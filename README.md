@@ -72,6 +72,17 @@ WHERE recording_fts MATCH 'bullmq' AND r.superseded_by IS NULL
 ORDER BY bm25(recording_fts) LIMIT 10;
 SQL
 
+# Substring / fuzzy search via the trigram index. The porter tokenizer above
+# matches whole words; recording_trgm matches 3-character windows, so it
+# finds infixes ('icing' inside 'pricing'), glued identifiers, and typos
+# ('notifcations'). Needs >=3 chars; no stemming (use recording_fts for that).
+swrag sql <<'SQL'
+SELECT r.folder_name, snippet(recording_trgm, -1, '«', '»', '…', 5)
+FROM recording_trgm JOIN recording r ON r.rowid = recording_trgm.rowid
+WHERE recording_trgm MATCH 'icing' AND r.superseded_by IS NULL
+ORDER BY bm25(recording_trgm) LIMIT 10;
+SQL
+
 # Semantic search — works in any language; the shell composes the embedding.
 # `$(echo '…' | swrag embed)` runs in a subshell with its own stdin, so it
 # splices cleanly into the heredoc body.
@@ -211,17 +222,17 @@ All have sensible defaults; you shouldn't need to set any of them.
 
 ## Commands
 
-| Command                                | What it does                                                                                                            |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `swrag sql`                            | Run SQL via sqlite3 (default: list mode). SQL comes from stdin: `echo "…" \| swrag sql`, `swrag sql <<'SQL' … SQL`, or `swrag sql < file.sql`. Forward sqlite3 flags with `--` (`echo "…" \| swrag sql -- -json`). No positional. |
-| `swrag index`                          | Ingest changes from Super Whisper now.                                                                                  |
-| `swrag bootstrap`                      | One-shot post-install: start ollama, pull `bge-m3`, install the watch agent, index, install the agent skill, verify. Safe to re-run. |
-| `swrag doctor`                         | Verify the environment.                                                                                                 |
-| `swrag path [archive\|sqlite3\|vec0]`  | Print a filesystem path. Default: `archive`.                                                                            |
+| Command                                | What it does                                                                                                                                                                                                                                                                                  |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `swrag sql`                            | Run SQL via sqlite3 (default: list mode). SQL comes from stdin: `echo "…" \| swrag sql`, `swrag sql <<'SQL' … SQL`, or `swrag sql < file.sql`. Forward sqlite3 flags with `--` (`echo "…" \| swrag sql -- -json`). No positional.                                                             |
+| `swrag index`                          | Ingest changes from Super Whisper now.                                                                                                                                                                                                                                                        |
+| `swrag bootstrap`                      | One-shot post-install: start ollama, pull `bge-m3`, install the watch agent, index, install the agent skill, verify. Safe to re-run.                                                                                                                                                          |
+| `swrag doctor`                         | Verify the environment.                                                                                                                                                                                                                                                                       |
+| `swrag path [archive\|sqlite3\|vec0]`  | Print a filesystem path. Default: `archive`.                                                                                                                                                                                                                                                  |
 | `swrag embed`                          | Print the embedding of text as a SQLite blob literal (`x'…'`), for shell composition. Text comes from stdin: `echo 'text' \| swrag embed`, or a quoted heredoc (`swrag embed <<'EOF' … EOF`) — the heredoc avoids shell-quoting hazards for text with apostrophes, quotes, `$`, or backticks. |
-| `swrag install-skill`                  | Install the manual-invocation `SKILL.md` to Cursor and Claude Code.                                                     |
-| `swrag watch`                          | Run the event-driven watch daemon in the foreground (intended for launchd).                                             |
-| `swrag enable-watch` / `disable-watch` | Manage the launchd watch agent.                                                                                         |
+| `swrag install-skill`                  | Install the manual-invocation `SKILL.md` to Cursor and Claude Code.                                                                                                                                                                                                                           |
+| `swrag watch`                          | Run the event-driven watch daemon in the foreground (intended for launchd).                                                                                                                                                                                                                   |
+| `swrag enable-watch` / `disable-watch` | Manage the launchd watch agent.                                                                                                                                                                                                                                                               |
 
 ## Forwarding flags to sqlite3
 

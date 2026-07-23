@@ -132,7 +132,13 @@ which runs `runMigrations()` before doing anything else.
 src/archive/
 ├── migrations/
 │   ├── 001_init.sql                       # the original schema
-│   └── 002_audio_hash_supersedence.sql    # reprocess detection
+│   ├── 002_audio_hash_supersedence.sql    # reprocess detection
+│   ├── 003_fts_trigger_partial_index.sql  # narrow FTS update trigger + partial audio_hash index
+│   ├── 004_chunks.sql                     # per-chunk retrieval surface for long recordings
+│   ├── 005_cleanup_v09.sql                # drop v0.9 meeting-pipeline state
+│   ├── 006_transcript_schema.sql          # canonical transcript cols + datetime_iso + v0.9 redo
+│   ├── 007_trigram.sql                    # trigram FTS5 mirrors (substring/fuzzy retrieval)
+│   └── 008_drop_redundant_indexes.sql      # drop idx_recording_datetime + idx_recording_chunk_folder
 ├── migrations.ts    # imports the .sql files via `with { type: "text" }`
 ├── migrate.ts       # the runner; parses statements + tracks user_version
 └── open.ts          # calls runMigrations() inside openArchive()
@@ -196,6 +202,33 @@ schema is already at v2. On first open with the new binary:
 - `PRAGMA user_version` is bumped to 2.
 
 From then on the archive is fully under migration-runner control.
+
+### Retrieval surfaces
+
+The archive exposes three retrieval axes, each at two granularities
+(whole-row + chunk). All are virtual tables kept in sync by triggers, so the
+ingester never maintains them by hand — it writes `recording` /
+`recording_chunk` and the indexes follow.
+
+| Axis              | Whole-row        | Chunk                  | Tokenizer / metric | Good for                                        |
+| ----------------- | ---------------- | ---------------------- | ------------------ | ----------------------------------------------- |
+| Keyword (stemmed) | `recording_fts`  | `recording_chunk_fts`  | porter unicode61   | word match, prefix, phrase, NEAR                |
+| Substring / fuzzy | `recording_trgm` | `recording_chunk_trgm` | trigram            | infixes, glued identifiers, typos, `LIKE '%s%'` |
+| Semantic          | `recording_vec`  | `recording_chunk_vec`  | bge-m3 cosine      | paraphrase, cross-lingual                       |
+
+The porter and trigram tables are **complements, not replacements**:
+porter stems (`notification` ↔ `notifications`) but can't substring-match;
+trigram substrings (`MATCH 'icing'` finds "pricing") and accelerates
+`LIKE '%str%'`, but doesn't stem and needs ≥3 chars. Recipes pick the right
+surface for the query; hybrid (RRF) recipes combine keyword + semantic.
+
+Migration 008 dropped two redundant indexes that survived from earlier
+schemas: `idx_recording_datetime` (the only production query on raw
+`datetime` wraps it in `datetime()`, making any index unusable — recipes
+use the normalized `datetime_iso`) and `idx_recording_chunk_folder` (the
+table's `UNIQUE (folder_name, chunk_idx)` constraint already covers those
+lookups). At personal-archive scale index choice is about cleanliness, not
+performance — SQLite scans a few thousand rows faster than an index lookup.
 
 ## We never touch macOS's stock sqlite3
 

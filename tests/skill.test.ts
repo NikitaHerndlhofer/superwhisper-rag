@@ -19,13 +19,30 @@ describe("SKILL_MD", () => {
     expect(SKILL_MD).toContain("-- 18. Filter-then-retrieve (chunk)");
     expect(SKILL_MD).toContain("-- 19. Rank RECORDINGS by best-chunk match");
     expect(SKILL_MD).toContain("-- 12. Reprocessing history of a recording");
+    // New retrieval modalities (v1.3.0): trigram substring/fuzzy + recency-decay.
+    expect(SKILL_MD).toContain(
+      "-- 20. Substring / light-fuzzy (trigram, whole-row)",
+    );
+    expect(SKILL_MD).toContain(
+      "-- 21. Substring / fuzzy at chunk granularity (trigram)",
+    );
+    expect(SKILL_MD).toContain("-- 22. Recency-decay ranking");
+  });
+
+  test("documents the trigram tables in the schema section", () => {
+    expect(SKILL_MD).toContain("recording_trgm");
+    expect(SKILL_MD).toContain("recording_chunk_trgm");
+    // The ≥3-char floor is the one trigram gotcha an agent must know.
+    expect(SKILL_MD).toContain("≥3 chars");
   });
 
   test("leads with stdin as the default input and documents the quoting-safe embed", () => {
     expect(SKILL_MD).toContain("swrag sql <<'SQL'");
     expect(SKILL_MD).toContain("QV=$(swrag embed <<'EOF'");
     // Canonical inline embedding form (command substitution with its own stdin).
-    expect(SKILL_MD).toContain("$(echo 'how do notifications work' | swrag embed)");
+    expect(SKILL_MD).toContain(
+      "$(echo 'how do notifications work' | swrag embed)",
+    );
   });
 
   test("describes what the tool does, not what it lacks — no REPL/anti-feature bloat", () => {

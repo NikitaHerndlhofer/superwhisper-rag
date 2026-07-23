@@ -28,17 +28,13 @@
  * filesystem reads.
  */
 import init from "./migrations/001_init.sql" with { type: "text" };
-import audioHashSupersedence from "./migrations/002_audio_hash_supersedence.sql" with {
-  type: "text",
-};
-import ftsTriggerPartialIndex from "./migrations/003_fts_trigger_partial_index.sql" with {
-  type: "text",
-};
+import audioHashSupersedence from "./migrations/002_audio_hash_supersedence.sql" with { type: "text" };
+import ftsTriggerPartialIndex from "./migrations/003_fts_trigger_partial_index.sql" with { type: "text" };
 import chunks from "./migrations/004_chunks.sql" with { type: "text" };
 import cleanupV09 from "./migrations/005_cleanup_v09.sql" with { type: "text" };
-import transcriptSchema from "./migrations/006_transcript_schema.sql" with {
-  type: "text",
-};
+import transcriptSchema from "./migrations/006_transcript_schema.sql" with { type: "text" };
+import trigram from "./migrations/007_trigram.sql" with { type: "text" };
+import dropRedundantIndexes from "./migrations/008_drop_redundant_indexes.sql" with { type: "text" };
 
 export interface Migration {
   /** Strictly increasing integer; matches the file name prefix. */
@@ -52,11 +48,19 @@ export interface Migration {
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: init },
   { version: 2, name: "audio_hash_supersedence", sql: audioHashSupersedence },
-  { version: 3, name: "fts_trigger_partial_index", sql: ftsTriggerPartialIndex },
+  {
+    version: 3,
+    name: "fts_trigger_partial_index",
+    sql: ftsTriggerPartialIndex,
+  },
   { version: 4, name: "chunks", sql: chunks },
   { version: 5, name: "cleanup_v09", sql: cleanupV09 },
   { version: 6, name: "transcript_schema", sql: transcriptSchema },
+  { version: 7, name: "trigram", sql: trigram },
+  { version: 8, name: "drop_redundant_indexes", sql: dropRedundantIndexes },
 ];
 
 /** Latest version known to this binary. */
-export const LATEST_VERSION: number = Math.max(...MIGRATIONS.map((m) => m.version));
+export const LATEST_VERSION: number = Math.max(
+  ...MIGRATIONS.map((m) => m.version),
+);

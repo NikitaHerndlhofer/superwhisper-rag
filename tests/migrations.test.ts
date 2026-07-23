@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ensureExtensionCapableSqlite, openArchive } from "../src/archive/open.ts";
+import {
+  ensureExtensionCapableSqlite,
+  openArchive,
+} from "../src/archive/open.ts";
 import { runMigrations, splitSqlStatements } from "../src/archive/migrate.ts";
 import { LATEST_VERSION, MIGRATIONS } from "../src/archive/migrations.ts";
 import { vecDylibPath } from "../src/archive/vec-loader.ts";
@@ -117,7 +120,9 @@ describe("runMigrations idempotency", () => {
       const init = MIGRATIONS[0];
       if (!init) throw new Error("missing init migration");
       db.exec(init.sql);
-      expect(queryOne(db, UserVersionRowSchema, "PRAGMA user_version").user_version).toBe(0);
+      expect(
+        queryOne(db, UserVersionRowSchema, "PRAGMA user_version").user_version,
+      ).toBe(0);
 
       const result = runMigrations(db);
       expect(result.fromVersion).toBe(0);
@@ -142,9 +147,9 @@ describe("runMigrations idempotency", () => {
       db.exec("ALTER TABLE recording ADD COLUMN audio_hash TEXT");
 
       expect(() => runMigrations(db)).not.toThrow();
-      expect(queryOne(db, UserVersionRowSchema, "PRAGMA user_version").user_version).toBe(
-        LATEST_VERSION,
-      );
+      expect(
+        queryOne(db, UserVersionRowSchema, "PRAGMA user_version").user_version,
+      ).toBe(LATEST_VERSION);
     } finally {
       db.close();
     }
@@ -199,6 +204,8 @@ const FROZEN_MIGRATION_HASHES: Record<number, string> = {
   4: "a0fdb59ff53d4c0cc6f0a271bd43539c3e5b0efb513ddbac5a109bdae0e41263",
   5: "334f6fee522fda819d80d4e974a03b0266ff12df8c17c2b23461705aac715bb5",
   6: "b6067c163713bb5a7c48a71c309e9ae60860777151cab464e71e535510c44a98",
+  7: "ffb9cfbe105c20e5704512c47176f45203101d81520e1f43124a37760ca3ba67",
+  8: "7709d1c4b6ab04aaee0d6b200e33b1380b54e4f1ae0df94b602dfd808d04ca5c",
 };
 
 describe("shipped migrations are immutable", () => {
@@ -454,7 +461,9 @@ describe("migration 006: FTS rebuild", () => {
         "SELECT folder_name FROM recording_fts WHERE recording_fts MATCH 'original'",
       );
       expect(before.map((m) => m.folder_name)).toContain("f-mut");
-      db.exec("UPDATE recording SET result = 'updated llm' WHERE folder_name = 'f-mut'");
+      db.exec(
+        "UPDATE recording SET result = 'updated llm' WHERE folder_name = 'f-mut'",
+      );
       const afterOld = queryAll(
         db,
         FtsRowSchema,
@@ -539,7 +548,9 @@ describe("migration 006: datetime_iso", () => {
           "ORDER BY datetime_iso ASC",
       );
       const order = rows.map((r) => r.folder_name);
-      expect(order.indexOf("f-new-earlier")).toBeLessThan(order.indexOf("f-legacy-later"));
+      expect(order.indexOf("f-new-earlier")).toBeLessThan(
+        order.indexOf("f-legacy-later"),
+      );
     } finally {
       db.close();
     }
@@ -602,18 +613,24 @@ describe("migration 006: v0.9 cleanup redo", () => {
       );
       db.exec("INSERT INTO meeting_queue (id, state) VALUES (1, 'paused')");
       // Simulate the v0.9 meeting config rows.
-      db.exec("INSERT INTO config (key, value) VALUES ('meeting_queue_state', 'paused')");
+      db.exec(
+        "INSERT INTO config (key, value) VALUES ('meeting_queue_state', 'paused')",
+      );
       db.exec(
         "INSERT INTO config (key, value) VALUES ('meeting_system_audio_default', '1')",
       );
       // And the v0.7 binary's user_version bump to 5.
       db.exec("PRAGMA user_version = 5");
 
-      // Now run the v1.1 binary's migrations. Only version 6 is pending.
+      // Now run the current binary's migrations. Everything after version 5
+      // is pending (6 onward); assert it dynamically so this test doesn't
+      // rot every time we ship a new migration.
       const outcome = runMigrations(db);
       expect(outcome.fromVersion).toBe(5);
       expect(outcome.toVersion).toBe(LATEST_VERSION);
-      expect(outcome.applied).toEqual([6]);
+      expect(outcome.applied).toEqual(
+        MIGRATIONS.filter((m) => m.version > 5).map((m) => m.version),
+      );
 
       const tables = queryAll(
         db,
@@ -634,10 +651,253 @@ describe("migration 006: v0.9 cleanup redo", () => {
   });
 });
 
+/* ---------------------------------------------------------------- *
+ * Migration 007 — trigram FTS5 (substring/fuzzy retrieval)
+ * Migration 008 — drop redundant indexes
+ * ---------------------------------------------------------------- */
+
+const TrgmRowSchema = z.object({ folder_name: z.string() });
+const IndexRowSchema = z.object({ name: z.string() });
+
+function insertChunk(
+  db: Database,
+  folderName: string,
+  chunkId: number,
+  text: string,
+): void {
+  db.prepare(
+    `INSERT INTO recording_chunk (id, folder_name, chunk_idx, start_word, end_word, word_count, text)
+     VALUES (?, ?, 0, 0, 0, 0, ?)`,
+  ).run(chunkId, folderName, text);
+}
+
+describe("migration 007: trigram tables exist", () => {
+  test("recording_trgm and recording_chunk_trgm are present after migration", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      const tables = queryAll(
+        db,
+        TableNameRowSchema,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('recording_trgm','recording_chunk_trgm')",
+      );
+      expect(tables.map((t) => t.name).sort()).toEqual([
+        "recording_chunk_trgm",
+        "recording_trgm",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("migration 007: recording_trgm substring search", () => {
+  test("MATCH on an infix the porter tokenizer cannot match", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-sub", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "pricing tier discussion",
+        result: null,
+      });
+      const matches = queryAll(
+        db,
+        TrgmRowSchema,
+        "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'icing'",
+      );
+      expect(matches.map((m) => m.folder_name)).toContain("f-sub");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("queries shorter than 3 characters match nothing (trigram floor)", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-short", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "pricing",
+        result: null,
+      });
+      const matches = queryAll(
+        db,
+        TrgmRowSchema,
+        "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'pr'",
+      );
+      expect(matches).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("insert trigger keeps recording_trgm in sync", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-ins", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "raw scribe output",
+        result: "polished LLM output",
+      });
+      // Substring unique to each column lands in the right place.
+      const rawHit = queryAll(
+        db,
+        TrgmRowSchema,
+        "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'cribe'",
+      );
+      const llmHit = queryAll(
+        db,
+        TrgmRowSchema,
+        "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'olish'",
+      );
+      expect(rawHit.map((m) => m.folder_name)).toContain("f-ins");
+      expect(llmHit.map((m) => m.folder_name)).toContain("f-ins");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("update trigger refreshes recording_trgm when result changes", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-mut", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "raw text",
+        result: "original narrative",
+      });
+      expect(
+        queryAll(
+          db,
+          TrgmRowSchema,
+          "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'rati'",
+        ).map((m) => m.folder_name),
+      ).toContain("f-mut");
+
+      db.exec(
+        "UPDATE recording SET result = 'updated commentary' WHERE folder_name = 'f-mut'",
+      );
+
+      expect(
+        queryAll(
+          db,
+          TrgmRowSchema,
+          "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'rati'",
+        ).map((m) => m.folder_name),
+      ).not.toContain("f-mut");
+      expect(
+        queryAll(
+          db,
+          TrgmRowSchema,
+          "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH 'mentary'",
+        ).map((m) => m.folder_name),
+      ).toContain("f-mut");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("migration 007: recording_chunk_trgm", () => {
+  test("substring match on chunk text via insert trigger", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-chunk", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "x",
+        result: null,
+      });
+      insertChunk(db, "f-chunk", 1, "how notifications work here");
+      const matches = queryAll(
+        db,
+        TrgmRowSchema,
+        "SELECT folder_name FROM recording_chunk_trgm WHERE recording_chunk_trgm MATCH 'otif'",
+      );
+      expect(matches.map((m) => m.folder_name)).toContain("f-chunk");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("delete trigger removes the chunk trgm row on rechunk", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-del", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "x",
+        result: null,
+      });
+      insertChunk(db, "f-del", 2, "unique zebra token");
+      expect(
+        queryAll(
+          db,
+          TrgmRowSchema,
+          "SELECT folder_name FROM recording_chunk_trgm WHERE recording_chunk_trgm MATCH 'zeb'",
+        ).map((m) => m.folder_name),
+      ).toContain("f-del");
+
+      // Rechunk deletes the old chunk row; the AFTER DELETE trigger must
+      // purge the trgm row or bm25()/MATCH will hit a phantom chunk.
+      db.exec("DELETE FROM recording_chunk WHERE id = 2");
+
+      expect(
+        queryAll(
+          db,
+          TrgmRowSchema,
+          "SELECT folder_name FROM recording_chunk_trgm WHERE recording_chunk_trgm MATCH 'zeb'",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("migration 008: drop redundant indexes", () => {
+  test("idx_recording_datetime and idx_recording_chunk_folder are gone", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      const dropped = queryAll(
+        db,
+        IndexRowSchema,
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN " +
+          "('idx_recording_datetime','idx_recording_chunk_folder')",
+      );
+      expect(dropped).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the datetime_iso index (the one recipes use) survives", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      const kept = queryAll(
+        db,
+        IndexRowSchema,
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_recording_datetime_iso'",
+      );
+      expect(kept).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("splitSqlStatements", () => {
   test("splits on top-level semicolons", () => {
     const stmts = splitSqlStatements("SELECT 1; SELECT 2; SELECT 3;");
-    expect(stmts.map((s) => s.trim())).toEqual(["SELECT 1;", "SELECT 2;", "SELECT 3;"]);
+    expect(stmts.map((s) => s.trim())).toEqual([
+      "SELECT 1;",
+      "SELECT 2;",
+      "SELECT 3;",
+    ]);
   });
 
   test("respects BEGIN…END trigger bodies", () => {

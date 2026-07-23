@@ -36,6 +36,7 @@ delimited by the `swrag:cookbook` HTML comments.
 >   The raw `result` / `llm_result` / `raw_result` columns are still
 >   present for debugging access to SW's own fields, but they shouldn't
 >   appear in day-to-day queries — they're noisy across SW versions.
+>
 > - **Sort and filter by `datetime_iso`**, not the raw `datetime`. SW
 >   has shipped two `datetime` formats over time (`"2026-05-27 18:39:33.470"`
 >   and `"2026-05-27T18:39:33.470Z"`) and lex-ordering them mixes up.
@@ -369,6 +370,67 @@ JOIN recording r ON r.folder_name = d.folder_name
 WHERE r.superseded_by IS NULL
 ORDER BY d.dist
 LIMIT 10;
+
+-- 20. Substring / light-fuzzy search (trigram, whole-row). The porter
+--     tokenizer (recipe 3) matches whole tokens — it can't find an infix
+--     like 'icing' inside 'pricing', a glued identifier like 'mybullmq',
+--     or a typo like 'notifcations'. The `trigram` tokenizer indexes every
+--     3-character window, so all three of those recall. It does NOT stem
+--     ('notification' != 'notifications' as tokens), so keep recipe 3 for
+--     stemmed word search and reach for trigram when you need substring or
+--     fuzzy recall. Queries shorter than 3 characters return nothing
+--     (no 3-char window to match) — use recipe 3's prefix syntax ('ab*')
+--     for 1–2 char terms. Trigram also accelerates `LIKE '%str%'` / `GLOB`
+--     to use the index instead of a full scan.
+SELECT r.folder_name, r.datetime_iso, r.mode_name,
+       snippet(recording_trgm, -1, '«', '»', '…', 10) AS snip,
+       bm25(recording_trgm) AS bm25
+FROM recording_trgm
+JOIN recording r ON r.rowid = recording_trgm.rowid
+WHERE recording_trgm MATCH 'icing'         -- ← substring goes here
+  AND r.superseded_by IS NULL
+ORDER BY bm25
+LIMIT 10;
+
+-- 21. Substring / fuzzy at chunk granularity (trigram). Sharper than 20 for
+--     long recordings; returns one row per matching chunk (a meeting can
+--     hit multiple times). Join on the same rowid as recording_chunk_fts.
+SELECT r.folder_name, r.datetime_iso, r.mode_name,
+       c.chunk_idx,
+       snippet(recording_chunk_trgm, 1, '«', '»', '…', 10) AS snip,
+       bm25(recording_chunk_trgm) AS bm25
+FROM recording_chunk_trgm
+JOIN recording_chunk c ON c.id = recording_chunk_trgm.rowid
+JOIN recording r ON r.folder_name = c.folder_name
+WHERE recording_chunk_trgm MATCH 'icing'    -- ← substring goes here
+  AND r.superseded_by IS NULL
+ORDER BY bm25 LIMIT 20;
+
+-- 22. Recency-decay ranking: semantic relevance × time boost. Blends vec
+--     distance with how recent the recording is, so "what did I say about X"
+--     prefers recent hits. Pure SQL, no schema. The score is
+--     (1 − dist) × exp(−age_days / half_life): relevance in [0,1] for good
+--     matches (dist < 1), multiplied by an exponential decay over age.
+--     Half-life here is 30 days — tune to taste (lower = more recency bias).
+--     Embed once into $QV so the vector isn't computed twice.
+--
+--       QV=$(echo 'how do notifications work' | swrag embed)
+--       swrag sql <<SQL
+WITH scored AS (
+  SELECT r.folder_name, r.datetime_iso, r.mode_name,
+         vec_distance_cosine(v.embedding, $QV) AS dist
+  FROM recording_vec v
+  JOIN recording r USING (folder_name)
+  WHERE r.superseded_by IS NULL
+)
+SELECT folder_name, datetime_iso, mode_name,
+       ROUND(dist, 3) AS dist,
+       ROUND((1.0 - dist)
+             * exp(-(julianday('now') - julianday(datetime_iso)) / 30.0), 3) AS score
+FROM scored
+ORDER BY score DESC
+LIMIT 10
+--       SQL
 ```
 
 <!-- swrag:cookbook:end -->
@@ -495,6 +557,11 @@ sqlite3 "$(swrag path)" \
 
 - **FTS5 syntax.** Wrap phrases in double quotes: `MATCH '"corporate group"'`.
   Use `*` for prefix matching: `notif*`. Combine with `NEAR/3 word`.
+- **Substring/fuzzy (trigram).** `recording_trgm` / `recording_chunk_trgm` match
+  3-character windows, so `MATCH 'icing'` finds "pricing" and light typos
+  ("notifcations") recall via shared trigrams. No stemming (use `recording_fts`
+  for that); needs ≥3 chars. Also accelerates `LIKE '%str%'` / `GLOB '*str*'`
+  to use the index instead of a full scan.
 - **`LIMIT` is your job.** Output is not auto-limited — this is a local
   DB. Add an explicit `LIMIT` so the agent context doesn't drown in rows.
 - **Read-only by default.** `swrag sql` opens via `file:…?mode=ro`. Any

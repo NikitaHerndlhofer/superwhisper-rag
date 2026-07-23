@@ -68,6 +68,9 @@ SQL
   - `source_deleted_at`/`source_audio_lost_at` — preservation markers.
     `audio_hash` groups reprocessings of the same audio.
 - `recording_fts` — FTS5 over both transcript columns. `MATCH`, `snippet()`, `bm25()`.
+- `recording_trgm` — FTS5 trigram mirror of `recording_fts` (same rowid). Substring/
+  infix + light fuzzy: `MATCH 'icing'` finds "pricing"; accelerates `LIKE '%s%'`.
+  No stemming (use `recording_fts`); needs ≥3 chars.
 - `recording_vec` — vec0, 1024-d bge-m3. `vec_distance_cosine(...)`. For long
   recordings this row is the L2-normalized centroid of its chunks (coarse filtering).
 - `recording_chunk` — ~300-word chunks of long recordings (word count > 500).
@@ -76,6 +79,7 @@ SQL
   **PK column is `chunk_id`, not `rowid`.**
 - `recording_chunk_fts` — FTS5 over chunk text. Join via
   `recording_chunk_fts.rowid = recording_chunk.id`.
+- `recording_chunk_trgm` — FTS5 trigram mirror of `recording_chunk_fts` (same rowid).
 
 ## Search variants
 
@@ -229,6 +233,39 @@ WHERE audio_hash=(SELECT audio_hash FROM recording WHERE folder_name='1779143179
 ORDER BY datetime_iso;
 ```
 
+```sql
+-- 20. Substring / light-fuzzy (trigram, whole-row). For infixes ('icing' in
+--     'pricing'), glued identifiers, or typos — the porter tokenizer (3) can't
+--     match these. Needs >=3 chars; no stemming ('notification' != 'notifications').
+SELECT r.folder_name, r.datetime_iso,
+       snippet(recording_trgm,-1,'«','»','…',10) AS snip, bm25(recording_trgm) AS bm25
+FROM recording_trgm JOIN recording r ON r.rowid=recording_trgm.rowid
+WHERE recording_trgm MATCH 'icing' AND r.superseded_by IS NULL
+ORDER BY bm25 LIMIT 10;
+-- Trigram also accelerates LIKE: WHERE raw_transcript LIKE '%icing%' uses the index.
+
+-- 21. Substring / fuzzy at chunk granularity (trigram). Sharper for long recordings.
+SELECT r.folder_name, r.datetime_iso, c.chunk_idx,
+       snippet(recording_chunk_trgm,1,'«','»','…',10) AS snip, bm25(recording_chunk_trgm) AS bm25
+FROM recording_chunk_trgm JOIN recording_chunk c ON c.id=recording_chunk_trgm.rowid
+JOIN recording r ON r.folder_name=c.folder_name
+WHERE recording_chunk_trgm MATCH 'icing' AND r.superseded_by IS NULL
+ORDER BY bm25 LIMIT 20;
+
+-- 22. Recency-decay ranking: relevance × time boost. "What did I say about X"
+--     preferring recent hits. Pure SQL, no schema. Half-life 30 days.
+--     QV=$(echo 'how do notifications work' | swrag embed); swrag sql <<SQL
+WITH scored AS (
+  SELECT r.folder_name, r.datetime_iso, r.mode_name,
+         vec_distance_cosine(v.embedding, $QV) AS dist
+  FROM recording_vec v JOIN recording r USING (folder_name)
+  WHERE r.superseded_by IS NULL)
+SELECT folder_name, datetime_iso, mode_name, ROUND(dist,3) AS dist,
+       ROUND((1.0-dist)*exp(-(julianday('now')-julianday(datetime_iso))/30.0),3) AS score
+FROM scored ORDER BY score DESC LIMIT 10
+-- SQL
+```
+
 ## Pick your surface
 
 | User asked for                                  | Use                                                  |
@@ -239,6 +276,8 @@ ORDER BY datetime_iso;
 | Best of keyword + semantic                      | 6 (whole-row) or 17 (chunk — usually wins long-form) |
 | "In `<mode>`/`<app>`/`<date>`, find the moment" | 18 (chunk) or 5 (whole-row)                          |
 | Rank recordings by best moment                  | 19                                                   |
+| Substring / typo / glued identifier             | 20 (whole-row) or 21 (chunk)                         |
+| "What did I say about X" — recent first         | 22 (recency-decay)                                   |
 | Reprocessing history                            | 12                                                   |
 
 - Chunk recipes (14–18) for "find the moment" in long recordings; whole-row
@@ -270,6 +309,8 @@ query if recall is poor.
   surface old reprocessings as duplicates.
 - `vec_distance_cosine(embedding, 'text')` — a text literal is not a vector.
   Always shell-compose with `$(echo '…' | swrag embed)` (or `$QV`).
+- `recording_trgm MATCH 'ab'` — trigram needs ≥3 characters; 1–2 char queries
+  return nothing. Use `recording_fts` prefix matching (`'ab*'`) for short terms.
 - `LIMIT 50` on a full-transcript recipe — meetings can be 10K+ words. Use
   `LIMIT 5` for full transcripts, `LIMIT 20` for chunk-text.
 - Reaching for `recording_chunk*` for short recordings — short rows have no
