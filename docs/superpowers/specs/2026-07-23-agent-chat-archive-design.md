@@ -100,25 +100,31 @@ separate `config.data_version` governs data transformations (re-embedding), mirr
 ### Tables
 
 ```sql
--- A conversation = one Cursor/Claude/Codex session transcript file.
+-- A conversation = one agent session transcript file. Agent-agnostic: no agent-specific booleans
+-- or fields live here. Subagents are any conversation with a non-null parent_conversation_id.
+-- Dynamic attributes (background, agent-specific flags) live in conversation_tag (see below).
+-- Conversation lifetime is derived from messages: [MIN(message.created_at), MAX(message.created_at)].
 CREATE TABLE conversation (
-  id                   TEXT PRIMARY KEY,        -- agent's conversation_id (or file-hash-derived if none)
-  agent_name           TEXT NOT NULL,           -- 'cursor' | 'claude-code' | 'codex' | 'opencode'
-  source_path          TEXT NOT NULL,           -- absolute path to the transcript file
-  file_hash            TEXT,                    -- last-ingested content hash of source_path
+  id                     TEXT PRIMARY KEY,      -- agent's conversation_id (or file-hash-derived if none)
+  agent_name             TEXT NOT NULL,         -- 'cursor' | 'claude-code' | 'codex' | 'opencode'
+  repository             TEXT,                  -- git repo name (from remote origin, else workspace basename)
+  source_path            TEXT NOT NULL,         -- absolute path to the transcript file
+  file_hash              TEXT,                  -- last-ingested content hash of source_path
   parent_conversation_id TEXT,                  -- set for subagents (links to parent conversation)
-  is_subagent          INTEGER NOT NULL DEFAULT 0,
-  is_background        INTEGER NOT NULL DEFAULT 0,
-  workspace_root       TEXT,
-  model                TEXT,
-  started_at           TEXT,                     -- ISO8601
-  ended_at             TEXT,
-  end_reason           TEXT,
-  last_generation_id   TEXT,                     -- Cursor: changes per user message; per-turn marker
-  superseded_by        TEXT,                     -- set when an in-place edit replaces this conversation
-  created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+  model                  TEXT,
+  superseded_by          TEXT,                  -- set when an in-place edit replaces this conversation
+  created_at             TEXT NOT NULL DEFAULT (datetime('now'))  -- when first archived
 );
+
+-- Dynamic tagging (replaces hardcoded is_subagent / is_background). Any conversation can have
+-- any tags: 'background', 'subagent' (if not implied by parent_conversation_id), agent-specific
+-- labels, etc. Queryable + indexable; no schema change needed to add a tag.
+CREATE TABLE conversation_tag (
+  conversation_id TEXT NOT NULL REFERENCES conversation(id),
+  tag             TEXT NOT NULL,
+  PRIMARY KEY(conversation_id, tag)
+);
+CREATE INDEX conv_tag_tag ON conversation_tag(tag);
 
 -- A message = one turn (user or assistant or tool/system) within a conversation.
 CREATE TABLE message (
@@ -126,26 +132,24 @@ CREATE TABLE message (
   conversation_id   TEXT NOT NULL REFERENCES conversation(id),
   seq               INTEGER NOT NULL,            -- 0-based order within conversation
   role              TEXT NOT NULL,               -- 'user' | 'assistant' | 'system' | 'tool'
-  generation_id     TEXT,                         -- Cursor per-user-message marker
   content           TEXT NOT NULL,               -- aggregated text of the turn
-  tool_name         TEXT,                         -- for tool calls
+  tool_name         TEXT,                         -- for tool calls (generic; null if not a tool call)
   tool_call_id      TEXT,
-  created_at        TEXT,                         -- ISO8601 if available in transcript
+  created_at        TEXT,                         -- ISO8601 from transcript (the turn's time in the agent)
   content_hash      TEXT,                         -- for cheap diffing on re-ingest
   UNIQUE(conversation_id, seq)
 );
 
--- A chunk = a searchable unit. One chunk per turn by default; long turns sub-chunked.
+-- A chunk = a searchable unit. One chunk per turn-segment by default; large segments are SPLIT
+-- into multiple chunks (never truncated — no context loss; each split carries a contextual header).
 CREATE TABLE chunk (
   id                TEXT PRIMARY KEY,            -- conversation_id + ':' + message_seq + ':' + sub
   conversation_id   TEXT NOT NULL REFERENCES conversation(id),
   message_id        TEXT NOT NULL REFERENCES message(id),
-  sub               INTEGER NOT NULL DEFAULT 0,   -- sub-chunk index within a long turn
+  sub               INTEGER NOT NULL DEFAULT 0,   -- sub-chunk index within a turn/segment
   role              TEXT NOT NULL,
-  chunk_type        TEXT NOT NULL DEFAULT 'text',  -- text|thinking|code|tool_call|tool_result|diff
-  text              TEXT NOT NULL,                 -- full text (FTS5 index + thread reconstruction)
-  embed_text        TEXT,                          -- text actually vectorized (truncated form for big tool results)
-  truncated         INTEGER NOT NULL DEFAULT 0,    -- 1 if embed_text is a truncated/summary form
+  chunk_type        TEXT NOT NULL DEFAULT 'text', -- text|thinking|code|tool_call|tool_result|diff
+  text              TEXT NOT NULL,                -- full chunk text (incl. contextual header for split chunks)
   token_count       INTEGER,
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -200,10 +204,11 @@ The chunker is segment-aware instead.
 - **`chunk_type` tag** on every chunk: `text` | `thinking` | `code` | `tool_call` | `tool_result` |
   `diff`. Recipes filter on it ("search only my prompts", "only code the agent wrote", "exclude
   tool dumps").
-- **Large tool outputs** (e.g. a 2000-line file read): `chunk.text` stores the **full** text (so
-  FTS5 keyword/fuzzy search sees it and the `thread` recipe reconstructs verbatim), but the
-  **embedded** form is truncated/representative (see §6) to avoid wasting compute and diluting
-  vectors.
+- **Large segments are split, never truncated** — no context is lost. A 2000-line file read becomes
+  multiple chunks, each fully embedded. Each split chunk carries a **contextual header** so it stays
+  self-describing out of context (e.g. "[tool_result: Read src/foo.ts — part 2/4, lines 501–1000]"),
+  and adjacent split chunks **overlap slightly** (a few lines) so a hit near a boundary isn't
+  orphaned. The `thread` and `context` recipes reconstruct the full segment and its neighbors.
 
 Rationale: user turns carry the intent/prompts (highest retrieval signal); assistant turns carry
 the response + reasoning; tool results carry the context the agent acted on. Segment-aware
@@ -217,12 +222,10 @@ conversation by joining `chunk`→`message`→`conversation`.
   turns carry the response. Both are embedded into `chunk_vec`.
 - **Thinking blocks**: embedded too (reasoning is high-signal and worth searching), tagged
   `chunk_type='thinking'` so recipes can include/exclude them.
-- **Tool/system turns**: embedded, but **large tool results are embedded in a truncated/
-  representative form**. `chunk.text` keeps the full text (for FTS5 + `thread` reconstruction);
-  `chunk.embed_text` holds the truncated form that is actually vectorized. Default policy: tool
-  results above **~4096 tokens** → embed head + tail (first/last ~1k tokens) or a one-line summary
-  (e.g. "Read src/foo.ts, 2000 lines"); set `truncated=1`. Threshold/policy configurable. This
-  keeps retrieval cheap and vectors focused, without losing verbatim text.
+- **Tool/system turns**: embedded in full, same as user/assistant turns. They carry the context
+  the agent acted on and are worth searching.
+- **Every chunk is embedded in full — never truncated.** Large segments are split into multiple
+  fully-embedded chunks (see §5), so no context is lost and vectors stay focused on coherent units.
 - **Idempotent**: per-chunk `content_hash`; re-ingest embeds only chunks whose hash changed.
 
 ## 7. Ingestion — hooks only (no FSEvents)
@@ -233,7 +236,7 @@ conversation by joining `chunk`→`message`→`conversation`.
 
 | Hook            | Payload field used                                       | acrag action                                                                                                                                          |
 | --------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stop`          | `transcript_path` (+ `conversation_id`, `generation_id`) | **background** `ingestFile(transcript_path)` — primary per-turn ingest                                                                                |
+| `stop`          | `transcript_path` (+ `conversation_id`)                 | **background** `ingestFile(transcript_path)` — primary per-turn ingest                                                                                |
 | `subagentStop`  | `agent_transcript_path` (+ `subagent_id`)                | **background** `ingestFile(agent_transcript_path)` as a **separate conversation**, `parent_conversation_id` resolved from the `subagentStart` mapping |
 | `workspaceOpen` | (none — scans dirs)                                      | **background sweep** (`acrag index`) — catches crashes, edits, missed turns, and any new transcripts                                                  |
 
@@ -248,17 +251,20 @@ fires per turn with the complete exchange.
 
 ### Transcript parsing (Cursor JSONL)
 
-Cursor transcripts are JSONL (one event per line) under `workspaceStorage`. A turn is a *tree of
-typed segments*, not a text blob. The parser (lives in `acrag` — agent-specific) produces typed
+Cursor transcripts are JSONL (one event per line) under `workspaceStorage`. A turn is a _tree of
+typed segments_, not a text blob. The parser (lives in `acrag` — agent-specific) produces typed
 segments that feed the core's `chunkSegments`:
 
 - **Stream line-by-line.** A single tool-result line can be MBs; cap line size, skip malformed lines
   (append races during active writes), never load the whole file into memory at once.
 - **Emit typed segments**: `{role, kind: text|thinking|code|tool_call|tool_result|diff|subagent,
-  content, tool_name, tool_call_id, generation_id, timestamp, agent_transcript_path?}`.
-- **Extract structure**: `conversation_id`, `generation_id` (per-turn marker), per-message
-  `role`/`seq`/`content`/timestamps, tool calls + results, thinking blocks, diffs, attachments,
-  subagent references (for `parent_conversation_id` linking).
+  content, tool_name, tool_call_id, timestamp, agent_transcript_path?}`.
+- **Extract structure**: `conversation_id`, per-message `role`/`seq`/`content`/timestamps, tool
+  calls + results, thinking blocks, diffs, attachments, subagent references (for
+  `parent_conversation_id` linking).
+- **Derive `repository`** from `workspace_roots` (git remote origin URL → repo name, else the
+  workspace basename). Apply dynamic **tags** (e.g. `background`) from hook metadata into
+  `conversation_tag` — never hardcode agent-specific booleans on the conversation row.
 - **Schema-drift robustness** (biggest Cursor-path risk): Cursor's JSONL schema evolves across
   versions → version-detect, ignore unknown fields, fail soft (log + skip a line, don't abort the
   whole file). Build and test the parser against a captured sample from the user's real install.
@@ -278,12 +284,12 @@ generated `hooks.json` (and a `cursor://settings` install snippet) so setup is "
 
 1. Read file → compute `file_hash`.
 2. Look up `conversation` row by `source_path`. If `file_hash` matches → exit (no-op).
-3. Parse transcript → list of turns (`role`, `seq`, `content`, `generation_id`, timestamps).
+3. Parse transcript → list of turns (`role`, `seq`, `content`, timestamps).
 4. Diff against stored `message` rows (by `conversation_id`+`seq`, cheap via `content_hash`):
    - new turns → insert `message` rows, chunk them, embed new chunks, upsert FTS5 + vec.
    - changed turns → update `message`, re-chunk + re-embed affected chunks, sync FTS5/vec.
    - removed turns → delete their `message`/`chunk` rows + FTS5/vec entries.
-5. Update `conversation.file_hash`, `last_generation_id`, `updated_at`.
+5. Update `conversation.file_hash`.
 6. If the transcript was structurally replaced (rare in-place edit beyond append), set the old
    conversation row `superseded_by = <new id>` and insert the new conversation row.
 
@@ -347,7 +353,9 @@ Proposed recipe set (slug — purpose):
 - `recency-decay` — semantic relevance × recency (same ranking shape as `swrag`'s recipe).
 - `hybrid` — combine `keyword` + `semantic` (FTS5 rank + vec distance, weighted).
 - `by-agent` — filter conversations/turns by `agent_name`.
-- `subagents` — conversations where `is_subagent = 1` (optionally with their parent).
+- `by-repo` — filter conversations/turns by `repository` (e.g. all chats in `SuperWhisperRag`).
+- `by-tag` — filter conversations by dynamic tag via `conversation_tag` (e.g. `background`).
+- `subagents` — conversations with a `parent_conversation_id` (optionally joined to their parent).
 - `thread` — reconstruct a full conversation: all `message` rows for a `conversation_id` ordered by
   `seq` (the "give me the whole chat" recipe).
 - `context` — neighboring turns around a given chunk (join `chunk`→`message` by `conversation_id` +
