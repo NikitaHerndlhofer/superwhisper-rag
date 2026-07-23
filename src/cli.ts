@@ -101,14 +101,14 @@ const sqlCmd = defineCommand({
   meta: {
     name: "sql",
     description:
-      "Run SQL through sqlite3 (vec preloaded, archive read-only, ingest first). Pipe SQL via stdin, pass it as a positional, or omit it for the sqlite3 REPL. Use `--` to forward sqlite3 flags.",
+      "Run SQL through sqlite3 (vec preloaded, archive read-only, ingest first). Pipe SQL via stdin (`echo \"…\" | swrag sql`), pass it as a positional, or forward it after `--`. Use `--` to pass sqlite3 flags.",
   },
   args: {
     query: {
       type: "positional",
       required: false,
       description:
-        "SQL string, '-' for stdin, or omit. With no positional and piped stdin, SQL is read from stdin; with no positional and a TTY, the sqlite3 REPL opens.",
+        "SQL string, '-' for stdin, or omit. With no positional and piped stdin, SQL is read from stdin; with no positional, no `--`, and a TTY, the command errors (no SQL provided).",
     },
   },
   async run({ args }) {
@@ -140,7 +140,8 @@ const sqlCmd = defineCommand({
     //   1. `swrag sql -`            → read stdin (explicit)
     //   2. `swrag sql "SELECT …"`   → inline positional
     //   3. `echo "…" | swrag sql`   → piped stdin (no positional, no `--`)
-    //   4. `swrag sql`              → REPL (TTY stdin, no positional, no `--`)
+    //   4. `swrag sql` (TTY)        → error — no SQL provided (no REPL;
+    //                                 agents should never hang on a TTY)
     //
     // When `--` is present the tail owns the SQL slot, so we ignore citty's
     // positional capture (`inline`) entirely — citty doesn't respect `--`
@@ -157,7 +158,12 @@ const sqlCmd = defineCommand({
     } else if (stdinIsPiped()) {
       sql = await readAllStdin();
     } else {
-      sql = null; // REPL
+      error(
+        "no SQL provided: pipe it (`echo \"…\" | swrag sql`), pass it as a " +
+          "positional (`swrag sql \"SELECT …\"`), use `-` to read stdin, " +
+          "or forward it after `--`.",
+      );
+      process.exit(2);
     }
 
     const { paths } = ctx();

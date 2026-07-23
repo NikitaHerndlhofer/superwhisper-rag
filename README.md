@@ -201,7 +201,7 @@ All have sensible defaults; you shouldn't need to set any of them.
 
 | Command                                | What it does                                                                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `swrag sql [SQL]`                      | Run SQL via sqlite3 (default: list mode). Pass SQL as a positional, pipe it (`echo "…" \| swrag sql`, `swrag sql < file.sql`), pass `-` to read stdin, or omit it to open the REPL. |
+| `swrag sql [SQL]`                      | Run SQL via sqlite3 (default: list mode). Pass SQL as a positional, pipe it (`echo "…" \| swrag sql`, `swrag sql < file.sql`), or forward it after `--`. No SQL → error (no REPL). |
 | `swrag index`                          | Ingest changes from Super Whisper now.                                                                                  |
 | `swrag bootstrap`                      | One-shot post-install: start ollama, pull `bge-m3`, install the watch agent, index, install the agent skill, verify. Safe to re-run. |
 | `swrag doctor`                         | Verify the environment.                                                                                                 |

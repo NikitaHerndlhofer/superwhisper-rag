@@ -21,7 +21,7 @@ import { run } from "./spawn.ts";
 
 export interface Sqlite3Options {
   archive: string;
-  /** SQL to execute. When null/empty, the caller wants the REPL. */
+  /** SQL to execute. When null/empty with no passthrough, the caller surfaces a "no SQL" error. */
   sql: string | null;
   /** Open read-only (default true). */
   readonly: boolean;
@@ -55,26 +55,10 @@ export function findSqlite3Binary(): string {
 
 /**
  * Execute a query through the sqlite3 CLI. stdout / stderr are captured;
- * the caller is responsible for forwarding them. For interactive use see
- * `execSqlite3Interactive`.
+ * the caller is responsible for forwarding them.
  */
 export function runSqlite3(opts: Sqlite3Options): Sqlite3Result {
   return run([findSqlite3Binary(), ...buildArgs(opts)]);
-}
-
-/**
- * Exec into sqlite3 with the current process's stdio. Used for the REPL
- * path (`swrag sql` with no query).
- */
-export function execSqlite3Interactive(opts: Sqlite3Options): number {
-  const args = buildArgs(opts);
-  const r = Bun.spawnSync({
-    cmd: [findSqlite3Binary(), ...args],
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  return r.exitCode ?? 1;
 }
 
 function buildArgs(opts: Sqlite3Options): string[] {

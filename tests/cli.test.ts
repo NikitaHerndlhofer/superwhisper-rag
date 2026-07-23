@@ -108,9 +108,8 @@ describe("swrag sql (pure sqlite3 passthrough)", () => {
     expect(r.stdout.trim()).toBe("Cursor");
   });
 
-  // Note: REPL behaviour (`sql == null`, no passthrough) is exercised
-  // manually — the interactive sqlite3 inherits stdin/stdout, which
-  // hangs in a non-TTY test runner.
+  // Note: the no-SQL-on-TTY path (`sql == null`, no passthrough) now errors
+  // instead of opening a REPL — see the stdin-input describe below.
 });
 
 /**
@@ -154,6 +153,12 @@ describe("swrag sql -- conflict detection (subprocess)", () => {
     const r = runCli(["sql", "SELECT 'inline' AS x"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout.trim()).toBe("inline");
+  });
+
+  test("swrag sql with no SQL and no `--` errors (no REPL)", () => {
+    const r = runCli(["sql"]);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/no SQL provided/);
   });
 
   test("inline SQL combined with `--` passthrough errors out", () => {

@@ -6,7 +6,7 @@
 2. An `embed()` substitution layer.
 3. A read-only URI + sqlite-vec auto-load for `swrag sql`.
 
-Everything else — output formats, REPL, dot-commands, parameter binding —
+Everything else — output formats, dot-commands, parameter binding —
 is the stock `sqlite3` CLI. We never reimplement what it already does.
 
 ## Boundary diagram
@@ -97,7 +97,9 @@ src/
       - The user's SQL, verbatim — OR, when the user typed `swrag sql -- …`, the args after `--` are forwarded to sqlite3 verbatim (which is how you ask for JSON/CSV/markdown output, dot-commands, named-parameter binding, etc.).
    4. Spawns `/opt/homebrew/opt/sqlite/bin/sqlite3` and forwards stdout, stderr, and exit code.
 
-If `sql` is empty (or the user typed `swrag sql` with no positional and no `--`), we exec sqlite3 with inherited stdio so the REPL has direct access to the terminal.
+If `sql` is empty (the user typed `swrag sql` with no positional, no `--`, and
+no piped stdin), the command errors with "no SQL provided" — there is no REPL,
+because agents should never hang on a TTY.
 
 Semantic search composes through the shell — see "Why semantic search is shell-composed, not SQL-substituted" below.
 
@@ -225,7 +227,7 @@ build into the picture.
 We use both:
 
 - **bun:sqlite** for `swrag index` — fast in-process writes, transactions, prepared statements.
-- **sqlite3 CLI** for `swrag sql` — its output formatters (`-csv`, `-json`, `-line`, `-column`, `-box`, `-markdown`, …) are battle-tested. We were never going to do them better. And the REPL is a feature for free.
+- **sqlite3 CLI** for `swrag sql` — its output formatters (`-csv`, `-json`, `-line`, `-column`, `-box`, `-markdown`, …) are battle-tested. We were never going to do them better. (We don't expose the REPL — `swrag sql` requires SQL from a positional, stdin, or `--`.)
 
 The two share the **same `vec0.dylib`** (materialised once to tmpdir) and the **same `libsqlite3.dylib`** (Homebrew's). The Homebrew formula declares `sqlite` as a dependency, so the CLI is always present.
 

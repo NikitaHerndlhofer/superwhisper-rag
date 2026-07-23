@@ -25,7 +25,7 @@ export async function readAllStdin(): Promise<string> {
  * `undefined` for pipes, files, and `Bun.spawnSync({ stdin: "pipe" })`,
  * and `false` in some runtimes. Treat anything that isn't explicitly a
  * TTY as "piped" so `echo "…" | swrag …` and `swrag … < file` both read
- * stdin instead of dropping into an interactive mode.
+ * stdin instead of erroring on missing input.
  */
 export function stdinIsPiped(): boolean {
   return process.stdin.isTTY !== true;

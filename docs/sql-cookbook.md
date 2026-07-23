@@ -423,12 +423,12 @@ whenever the text isn't under your direct control.
 
 ## Piping SQL via stdin
 
-`swrag sql` reads SQL from a positional argument, from stdin, or opens
-the sqlite3 REPL when given nothing on a TTY. **Stdin is the
-quoting-safe path** for any SQL containing single quotes, `$`, or
-backticks — a quoted heredoc (`<<'SQL'`) disables all shell expansion, so
-the SQL is literal and you only need SQL-standard `''` doubling for
-string literals:
+`swrag sql` reads SQL from a positional argument, from stdin, or from the
+`--` tail. Given nothing on a TTY it errors (no REPL — agents should never
+hang on a TTY). **Stdin is the quoting-safe path** for any SQL containing
+single quotes, `$`, or backticks — a quoted heredoc (`<<'SQL'`) disables all
+shell expansion, so the SQL is literal and you only need SQL-standard `''`
+doubling for string literals:
 
 ```bash
 # Pipe SQL (no shell escaping to worry about):

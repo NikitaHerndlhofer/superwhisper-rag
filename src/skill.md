@@ -22,7 +22,6 @@ WHERE superseded_by IS NULL ORDER BY datetime_iso DESC LIMIT 5;
 SQL
 
 # Or positional (trivial queries):  swrag sql "SELECT folder_name FROM recording LIMIT 5"
-# Or REPL (vec preloaded):         swrag sql
 # Forward flags; pipe SQL with `-`: swrag sql - -- -json <<'SQL' … SQL
 ```
 

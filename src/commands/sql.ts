@@ -1,6 +1,6 @@
 import { ensureFresh } from "../ingest/ingester.ts";
 import { warn } from "../log.ts";
-import { execSqlite3Interactive, runSqlite3, type Sqlite3Result } from "../sqlite3.ts";
+import { runSqlite3, type Sqlite3Result } from "../sqlite3.ts";
 import { readAllStdin } from "../stdin.ts";
 
 /**
@@ -31,7 +31,7 @@ import { readAllStdin } from "../stdin.ts";
  *              LIMIT 5"
  */
 export interface RunSqlOptions {
-  /** SQL to execute. `null` or empty drops into the sqlite3 REPL. */
+  /** SQL to execute. `null`/empty with no passthrough is an error (no REPL). */
   sql: string | null;
   archive: string;
   sourceDb: string;
@@ -91,12 +91,14 @@ export async function runSql(opts: RunSqlOptions): Promise<Sqlite3Result> {
   }
 
   if (trimmed.length === 0) {
-    const code = execSqlite3Interactive({
-      archive: opts.archive,
-      sql: null,
-      readonly: true,
-    });
-    return { exitCode: code, stdout: "", stderr: "" };
+    // No SQL and no passthrough. The CLI handler catches this earlier with
+    // an actionable error; reaching here means a direct caller passed
+    // nothing. Surface it rather than silently succeed with empty output.
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr: "no SQL provided: pipe stdin, pass a positional, or forward after `--`.",
+    };
   }
 
   return runSqlite3({
