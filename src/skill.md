@@ -14,8 +14,7 @@ is sqlite3 list mode (pipe-separated, no header).
 
 ## Input
 
-Pipe SQL via stdin. A quoted heredoc (`<<'SQL'`) disables shell expansion —
-the SQL is literal, no escaping to forget:
+Pipe SQL via stdin:
 
 ```bash
 swrag sql <<'SQL'
@@ -31,8 +30,7 @@ SQL
 ## Semantic search
 
 No in-SQL `embed()`. `swrag embed` reads text from stdin and prints a SQLite
-blob literal (`x'…'`). Inline it via command substitution — the `$(…)`
-subshell has its own stdin, so it composes cleanly inside a SQL heredoc:
+blob literal (`x'…'`). Inline it with command substitution:
 
 ```bash
 swrag sql <<SQL
@@ -43,8 +41,7 @@ SQL
 ```
 
 For text with apostrophes, quotes, `$`, or backticks, embed via a quoted
-heredoc instead (expansion off → literal text), then interpolate the blob
-variable — it's hex plus `x''`, so it's safe:
+heredoc and interpolate the blob variable:
 
 ```bash
 QV=$(swrag embed <<'EOF'
