@@ -26,7 +26,7 @@ afterEach(() => {
 /**
  * End-to-end tests of the agent-facing surface.
  *
- * For semantic recipes (cookbook 4–6), the production path is shell
+ * For semantic recipes (cookbook `semantic`–`hybrid`), the production path is shell
  * composition: the user runs `$(echo 'text' | swrag embed)` and `swrag embed`
  * shells out to Ollama via curl. To keep these tests offline we don't
  * exercise that pipeline — we instead drive the same SQL surface

@@ -20,7 +20,7 @@ delimited by the `swrag:cookbook` HTML comments.
 >   specifically want to see Super Whisper's reprocessing history.
 > - **Modes (`mode_name`) are user-configurable in Super Whisper** — don't
 >   hard-code mode names without first checking which ones this user has
->   (recipe 0 below). Filter with `mode_name_lower` (case-insensitive,
+>   (`modes` below). Filter with `mode_name_lower` (case-insensitive,
 >   indexed) once you know the names.
 > - **Two canonical transcript columns** (as of v1.1.0):
 >   - `raw_transcript` — what Scribe (STT) produced. Always present
@@ -45,7 +45,7 @@ delimited by the `swrag:cookbook` HTML comments.
 >   configured threshold (default 500) are also split into ~300-word
 >   chunks in `recording_chunk` + `recording_chunk_vec` + `recording_chunk_fts`.
 >   For "find the moment where I said X", use the chunk tables (recipes
->   13–17). For coarse filtering ("which meetings touch topic Y"), the
+>   `chunked-rows` through `hybrid-chunk`). For coarse filtering ("which meetings touch topic Y"), the
 >   row-level `recording_vec` is the L2-normalized centroid of its
 >   chunks. Short rows have a single vector and no chunks — query
 >   `recording*` as usual.
@@ -53,7 +53,7 @@ delimited by the `swrag:cookbook` HTML comments.
 <!-- swrag:cookbook:start -->
 
 ```sql
--- 0. Discover the user's modes (run this first if you don't already
+-- modes — Discover the user's modes (run this first if you don't already
 --    know what to filter on).
 SELECT mode_name, COUNT(*) AS n
 FROM recording
@@ -61,7 +61,7 @@ WHERE superseded_by IS NULL
 GROUP BY mode_name
 ORDER BY n DESC;
 
--- 1. Today's recordings, newest first. `COALESCE(processed, raw)`
+-- today — Today's recordings, newest first. `COALESCE(processed, raw)`
 --    gives "best available transcript": the LLM-polished text when
 --    a mode ran an LLM, the Scribe text otherwise.
 SELECT folder_name, datetime_iso, mode_name,
@@ -71,8 +71,8 @@ WHERE superseded_by IS NULL
   AND date(datetime_iso) = date('now', 'localtime')
 ORDER BY datetime_iso DESC;
 
--- 2. Meeting recordings from the last 7 days
---    (replace 'meeting' with whatever recipe 0 surfaced for this user)
+-- mode-recent — Meeting recordings from the last 7 days
+--    (replace 'meeting' with whatever `modes` surfaced for this user)
 SELECT folder_name, datetime_iso, duration_sec,
        COALESCE(processed_transcript, raw_transcript) AS transcript
 FROM recording
@@ -81,7 +81,7 @@ WHERE superseded_by IS NULL
   AND datetime_iso >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
 ORDER BY datetime_iso DESC;
 
--- 3. Keyword search with snippet (FTS5). `recording_fts` indexes
+-- keyword — Keyword search with snippet (FTS5). `recording_fts` indexes
 --    `raw_transcript` (col 1) and `processed_transcript` (col 2),
 --    so MATCH finds hits in either; `snippet(recording_fts, -1, …)`
 --    auto-selects the first matched column for the excerpt.
@@ -96,7 +96,7 @@ ORDER BY bm25
 LIMIT 10;
 -- MATCH syntax: 'bullmq', '"corporate group"', 'notif*', 'bull NEAR queue'
 
--- 4. Semantic search (any language) — shell composition via swrag embed.
+-- semantic — Semantic search (any language) — shell composition via swrag embed.
 --    Run from a shell, piping the SQL in (the $(echo '…' | swrag embed) expands
 --    in a subshell with its own stdin, so it splices into the heredoc body):
 --      swrag sql <<SQL
@@ -112,7 +112,7 @@ WHERE r.superseded_by IS NULL
 ORDER BY dist
 LIMIT 10;
 
--- 5. Semantic + structured filter
+-- semantic-filtered — Semantic + structured filter
 SELECT r.folder_name, r.datetime_iso, r.app_name,
        vec_distance_cosine(v.embedding,
                            $(echo 'how do notifications work' | swrag embed)) AS dist
@@ -124,7 +124,7 @@ WHERE r.superseded_by IS NULL
 ORDER BY dist
 LIMIT 10;
 
--- 6. Hybrid retrieval with Reciprocal Rank Fusion (k=60).
+-- hybrid — Hybrid retrieval with Reciprocal Rank Fusion (k=60).
 --    Capture the search term once so we don't embed twice:
 --
 --      Q="how do notifications work"
@@ -152,7 +152,7 @@ LIMIT 10;
 --        ORDER BY rrf DESC LIMIT 10
 --      SQL
 
--- 7. Daily dictation volume by mode
+-- stats-daily-volume — Daily dictation volume by mode
 SELECT date(datetime_iso) AS day, mode_name, COUNT(*) AS n,
        ROUND(SUM(duration_sec)/60.0, 1) AS minutes
 FROM recording
@@ -160,7 +160,7 @@ WHERE superseded_by IS NULL
 GROUP BY day, mode_name
 ORDER BY day DESC, n DESC;
 
--- 8. Longest recordings. `processed_word_count` is non-zero exactly
+-- stats-longest — Longest recordings. `processed_word_count` is non-zero exactly
 --    when the recording had an LLM stage; for voice-only modes,
 --    `raw_word_count` is what to read instead.
 SELECT folder_name, datetime_iso, mode_name,
@@ -171,7 +171,7 @@ WHERE superseded_by IS NULL
 ORDER BY duration_sec DESC
 LIMIT 10;
 
--- 9. Per-app breakdown
+-- stats-per-app — Per-app breakdown
 SELECT app_name, COUNT(*) AS n, AVG(duration_sec) AS avg_sec
 FROM recording
 WHERE superseded_by IS NULL
@@ -179,7 +179,7 @@ WHERE superseded_by IS NULL
 GROUP BY app_name
 ORDER BY n DESC;
 
--- 10. Preservation stats: how much have we saved from Super Whisper retention?
+-- stats-preservation — Preservation stats: how much have we saved from Super Whisper retention?
 SELECT
   COUNT(*) AS total_rows,
   SUM(CASE WHEN superseded_by IS NULL THEN 1 ELSE 0 END) AS canonical,
@@ -188,7 +188,7 @@ SELECT
   COUNT(source_audio_lost_at) AS preserved_audio_lost
 FROM recording;
 
--- 11. Recordings in a specific language
+-- stats-language — Recordings in a specific language
 SELECT folder_name, datetime_iso, mode_name,
        substr(COALESCE(processed_transcript, raw_transcript), 1, 80) AS preview
 FROM recording
@@ -196,7 +196,7 @@ WHERE superseded_by IS NULL
   AND language = 'pt'
 ORDER BY datetime_iso DESC;
 
--- 12. Reprocessing history of a recording (rare; only when the user asks)
+-- reprocess-history — Reprocessing history of a recording (rare; only when the user asks)
 SELECT folder_name, datetime_iso, mode_name, model_name, language_model_name,
        superseded_by, superseded_at
 FROM recording
@@ -205,7 +205,7 @@ WHERE audio_hash = (
 )
 ORDER BY datetime_iso;
 
--- 13. Which recordings have chunks? (i.e., which crossed the long-form
+-- chunked-rows — Which recordings have chunks? (i.e., which crossed the long-form
 --     threshold and got chunked at ingest.) Useful as a sanity check
 --     before reaching for chunk-level recipes.
 SELECT r.folder_name, r.datetime_iso, r.mode_name,
@@ -218,7 +218,7 @@ GROUP BY r.folder_name
 HAVING n_chunks > 0
 ORDER BY r.datetime_iso DESC;
 
--- 14. Best moment per long recording + the full transcript inline.
+-- best-moment — Best moment per long recording + the full transcript inline.
 --     This is the canonical RAG pattern for long-form retrieval:
 --     chunks for precise retrieval, full document for context.
 --     ~5K-word meetings fit comfortably in a Claude/GPT context window
@@ -246,7 +246,7 @@ JOIN recording r USING (folder_name)
 WHERE best.rn = 1 AND r.superseded_by IS NULL
 ORDER BY best.dist LIMIT 5;
 
--- 15. Chunk + immediate neighbors (lighter context — use when you don't
+-- chunk-neighbors — Chunk + immediate neighbors (lighter context — use when you don't
 --     need the full transcript). Returns the hit chunk plus chunk_idx ±1,
 --     in order, for the top semantic hit.
 WITH hit AS (
@@ -265,7 +265,7 @@ WHERE c.folder_name = hit.folder_name
   AND c.chunk_idx BETWEEN hit.chunk_idx - 1 AND hit.chunk_idx + 1
 ORDER BY c.chunk_idx;
 
--- 16. Chunk-level FTS5 keyword search. bm25() over 300-word chunks ranks
+-- keyword-chunk — Chunk-level FTS5 keyword search. bm25() over 300-word chunks ranks
 --     much sharper than bm25() over 5,000-word transcripts. Returns one
 --     row per matching chunk (a meeting can hit multiple times).
 SELECT r.folder_name, r.datetime_iso, r.mode_name,
@@ -279,11 +279,11 @@ WHERE recording_chunk_fts MATCH 'pricing'    -- ← user's term goes here
   AND r.superseded_by IS NULL
 ORDER BY bm25 LIMIT 20;
 
--- 17. Hybrid retrieval at chunk granularity (RRF, k=60). Combines
+-- hybrid-chunk — Hybrid retrieval at chunk granularity (RRF, k=60). Combines
 --     chunk-level FTS with chunk-level semantic ranking — usually
 --     beats either alone on long-form recall.
 --
---     Same shell pattern as recipe 6:
+--     Same shell pattern as `hybrid`:
 --       Q="pricing"
 --       QV=$(echo "$Q" | swrag embed)
 --       swrag sql <<SQL
@@ -309,7 +309,7 @@ ORDER BY bm25 LIMIT 20;
 --         ORDER BY rrf DESC LIMIT 10
 --       SQL
 
--- 18. Filter-then-retrieve at chunk granularity. Common shape: "in
+-- filter-then-retrieve — Filter-then-retrieve at chunk granularity. Common shape: "in
 --     <mode>/<app>/<date range>, find the moment where I said X."
 --     Narrow the chunk set on metadata first, then rank — the vector
 --     scan only computes distances for chunks that survive the filter.
@@ -330,8 +330,8 @@ FROM recording_chunk_vec v
 JOIN eligible_chunks e ON e.chunk_id = v.chunk_id
 ORDER BY dist LIMIT 10;
 
--- 19. Rank RECORDINGS by best-chunk match (with short-recording fallback).
---     Companion to recipe 14, which returns the best CHUNK itself; this
+-- rank-recordings — Rank RECORDINGS by best-chunk match (with short-recording fallback).
+--     Companion to `best-moment`, which returns the best CHUNK itself; this
 --     one returns the parent recording, one row per recording. Long
 --     recordings are scored by MIN() across their chunks, so a meeting
 --     that nails topic X in 1 of 20 segments wins on that single strong
@@ -371,15 +371,15 @@ WHERE r.superseded_by IS NULL
 ORDER BY d.dist
 LIMIT 10;
 
--- 20. Substring / light-fuzzy search (trigram, whole-row). The porter
---     tokenizer (recipe 3) matches whole tokens — it can't find an infix
+-- trigram — Substring / light-fuzzy search (trigram, whole-row). The porter
+--     tokenizer (`keyword`) matches whole tokens — it can't find an infix
 --     like 'icing' inside 'pricing', a glued identifier like 'mybullmq',
 --     or a typo like 'notifcations'. The `trigram` tokenizer indexes every
 --     3-character window, so all three of those recall. It does NOT stem
---     ('notification' != 'notifications' as tokens), so keep recipe 3 for
+--     ('notification' != 'notifications' as tokens), so keep `keyword` for
 --     stemmed word search and reach for trigram when you need substring or
 --     fuzzy recall. Queries shorter than 3 characters return nothing
---     (no 3-char window to match) — use recipe 3's prefix syntax ('ab*')
+--     (no 3-char window to match) — use `keyword`'s prefix syntax ('ab*')
 --     for 1–2 char terms. Trigram also accelerates `LIKE '%str%'` / `GLOB`
 --     to use the index instead of a full scan.
 SELECT r.folder_name, r.datetime_iso, r.mode_name,
@@ -392,7 +392,7 @@ WHERE recording_trgm MATCH 'icing'         -- ← substring goes here
 ORDER BY bm25
 LIMIT 10;
 
--- 21. Substring / fuzzy at chunk granularity (trigram). Sharper than 20 for
+-- trigram-chunk — Substring / fuzzy at chunk granularity (trigram). Sharper than `trigram` for
 --     long recordings; returns one row per matching chunk (a meeting can
 --     hit multiple times). Join on the same rowid as recording_chunk_fts.
 SELECT r.folder_name, r.datetime_iso, r.mode_name,
@@ -406,7 +406,7 @@ WHERE recording_chunk_trgm MATCH 'icing'    -- ← substring goes here
   AND r.superseded_by IS NULL
 ORDER BY bm25 LIMIT 20;
 
--- 22. Recency-decay ranking: semantic relevance × time boost. Blends vec
+-- recency-decay — Recency-decay ranking: semantic relevance × time boost. Blends vec
 --     distance with how recent the recording is, so "what did I say about X"
 --     prefers recent hits. Pure SQL, no schema. The score is
 --     (1 − dist) × exp(−age_days / half_life): relevance in [0,1] for good

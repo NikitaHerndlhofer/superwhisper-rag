@@ -108,9 +108,9 @@ surface prompt or clipboard data unless the user explicitly asks.
 
 (After invoking the skill.)
 
-- "What did I dictate this morning?" → cookbook recipe 1.
-- "Find meetings about BullMQ from last week." → recipes 2 + 3.
-- "Where did I talk about notifications going to the right user?" → recipe 4, with `$(echo 'notifications going to the right user' | swrag embed)` composed into the SQL.
+- "What did I dictate this morning?" → cookbook `today`.
+- "Find meetings about BullMQ from last week." → `mode-recent` + `keyword`.
+- "Where did I talk about notifications going to the right user?" → `semantic`, with `$(echo 'notifications going to the right user' | swrag embed)` composed into the SQL.
 - "Show me everything I dictated while in Cursor in Portuguese." → `WHERE app_name = 'Cursor' AND language = 'pt'`.
-- "How much have I talked this week?" → recipe 7.
-- "What's still in the archive that Super Whisper deleted?" → recipe 10.
+- "How much have I talked this week?" → `stats-daily-volume`.
+- "What's still in the archive that Super Whisper deleted?" → `stats-preservation`.

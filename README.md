@@ -97,7 +97,7 @@ SQL
 
 # Find the precise moment in a long meeting — chunk-level semantic search
 # returns ~300-word windows instead of "this hour-long meeting probably
-# talked about it". Recipe 14 in the cookbook joins the full transcript
+# talked about it". `best-moment` in the cookbook joins the full transcript
 # back in for context.
 swrag sql <<SQL
 SELECT r.folder_name, c.chunk_idx, c.text,
@@ -132,8 +132,8 @@ aware, deterministic, no LLM call) and embedded individually into
 `recording_vec` still works for coarse filtering — it's now the
 L2-normalized centroid of the row's chunks. Once you've found the
 chunk, `COALESCE(processed_transcript, raw_transcript)` on the parent
-row is the full transcript right there for context. Recipes 13–17 in
-the cookbook cover the chunk-level patterns.
+row is the full transcript right there for context. Recipes `chunked-rows`
+through `hybrid-chunk` in the cookbook cover the chunk-level patterns.
 
 ## Install
 
