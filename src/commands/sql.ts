@@ -1,6 +1,7 @@
 import { ensureFresh } from "../ingest/ingester.ts";
 import { warn } from "../log.ts";
 import { execSqlite3Interactive, runSqlite3, type Sqlite3Result } from "../sqlite3.ts";
+import { readAllStdin } from "../stdin.ts";
 
 /**
  * Run a SQL query against the archive by exec'ing the sqlite3 CLI.
@@ -51,11 +52,7 @@ export async function readSqlInput(
   fromStdin: boolean,
 ): Promise<string | null> {
   if (fromStdin) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    return Buffer.concat(chunks).toString("utf8");
+    return readAllStdin();
   }
   return inline;
 }
@@ -79,13 +76,15 @@ export async function runSql(opts: RunSqlOptions): Promise<Sqlite3Result> {
   const extra = opts.extraArgs ?? [];
   const trimmed = (opts.sql ?? "").trim();
 
-  // Passthrough mode: the user provided `--`, so their SQL (if any) is
-  // already inside `extra`. We never add our own `sql` positional in
-  // this case — the user is in full control of sqlite3's argv tail.
+  // Passthrough mode: the user wrote `swrag sql -- <args>`. `<args>` may
+  // carry sqlite3 flags and/or the SQL itself. When the caller also hands
+  // us SQL (the `swrag sql - -- -json` shape — SQL via stdin, flags via the
+  // tail), we keep both: `buildArgs` appends `sql` after `extraArgs`,
+  // which is the sqlite3-correct order (DATABASE, flags, SQL).
   if (extra.length > 0) {
     return runSqlite3({
       archive: opts.archive,
-      sql: null,
+      sql: trimmed.length > 0 ? trimmed : null,
       readonly: true,
       extraArgs: extra,
     });

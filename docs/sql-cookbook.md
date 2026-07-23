@@ -1,10 +1,10 @@
 # SQL cookbook
 
-This document is the canonical set of patterns the agent has been taught.
-The bundled `SKILL.md` imports the recipe block below verbatim via
-`src/skill.ts`, so this file is the single source of truth — edits here
-propagate to `SKILL.md` at build time. The slice is delimited by the
-`swrag:cookbook` HTML comments and must not be removed.
+The full reference of query patterns. The bundled `SKILL.md` (`src/skill.md`)
+carries a condensed instruction-only variant of these recipes for the agent;
+this document is the extended reference for humans, with the full commentary
+and the stats recipes that the skill trims out. The recipe block below is
+delimited by the `swrag:cookbook` HTML comments.
 
 > **Defaults.**
 >
@@ -13,7 +13,9 @@ propagate to `SKILL.md` at build time. The slice is delimited by the
 >   For JSON, CSV, or any other mode, see "Other output modes" below.
 > - There is **no `embed(:q)`** or `--param`. For semantic search,
 >   compose with the shell: `$(swrag embed 'your text')` expands to a
->   `x'…'` blob literal before SQL is parsed.
+>   `x'…'` blob literal before SQL is parsed. For text containing quotes,
+>   `$`, or backticks, use the **stdin** form (see "Quoting-safe semantic
+>   search" below) — a quoted heredoc disables shell expansion entirely.
 > - **Always filter `WHERE superseded_by IS NULL`** unless you
 >   specifically want to see Super Whisper's reprocessing history.
 > - **Modes (`mode_name`) are user-configurable in Super Whisper** — don't
@@ -390,6 +392,76 @@ swrag sql "<...query using $QV in two places...>"
 
 There is no in-SQL `embed()` function. The composition happens entirely
 at the shell layer.
+
+### Quoting-safe semantic search (use this for arbitrary user text)
+
+The inline `$(swrag embed '…')` form is fine for simple text, but the
+embed text sits inside a double-quoted SQL string, so it **is**
+shell-evaluated: apostrophes (`don't`, `it's`), `$`, and backticks break
+it or inject. For arbitrary user speech, read the text from **stdin**
+with a quoted heredoc — `<<'EOF'` disables all shell expansion, so the
+text lands verbatim — then interpolate the resulting blob variable into
+the SQL. The blob is hex plus `x''`, so it carries no shell
+metacharacters and is safe to interpolate:
+
+```bash
+QV=$(swrag embed <<'EOF'
+how do notifications work when I say "don't" and $HOME stuff
+EOF
+)
+swrag sql "SELECT r.folder_name, r.datetime_iso,
+                 vec_distance_cosine(v.embedding, $QV) AS dist
+          FROM recording_vec v JOIN recording r USING (folder_name)
+          WHERE r.superseded_by IS NULL
+          ORDER BY dist LIMIT 10"
+```
+
+`swrag embed` accepts text three ways: a positional (`swrag embed 'hi'`),
+`-` (`swrag embed -`), or a pipe (`echo 'hi' | swrag embed`,
+`swrag embed < file.txt`). The pipe/heredoc form is the one to reach for
+whenever the text isn't under your direct control.
+
+## Piping SQL via stdin
+
+`swrag sql` reads SQL from a positional argument, from stdin, or opens
+the sqlite3 REPL when given nothing on a TTY. **Stdin is the
+quoting-safe path** for any SQL containing single quotes, `$`, or
+backticks — a quoted heredoc (`<<'SQL'`) disables all shell expansion, so
+the SQL is literal and you only need SQL-standard `''` doubling for
+string literals:
+
+```bash
+# Pipe SQL (no shell escaping to worry about):
+swrag sql <<'SQL'
+SELECT folder_name, datetime_iso
+FROM recording
+WHERE raw_transcript LIKE '%don''t%'
+  AND superseded_by IS NULL
+ORDER BY datetime_iso DESC LIMIT 10;
+SQL
+
+# Same thing via echo / a file:
+echo "SELECT folder_name FROM recording LIMIT 5" | swrag sql
+swrag sql < query.sql
+
+# Explicit '-' also reads stdin:
+swrag sql - <<'SQL'
+…
+SQL
+```
+
+Combine piped SQL with sqlite3 flags by putting `-` before the `--` tail
+(SQL from stdin, flags from the tail):
+
+```bash
+swrag sql - -- -json <<'SQL'
+SELECT folder_name, datetime_iso FROM recording LIMIT 5
+SQL
+```
+
+(`echo "…" | swrag sql -- -json` without the `-` is rejected — the `--`
+tail owns the SQL slot, so be explicit with `-` when you want stdin to
+provide it.)
 
 ## Other output modes (and any other sqlite3 flag)
 

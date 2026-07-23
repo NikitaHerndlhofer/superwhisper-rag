@@ -201,12 +201,12 @@ All have sensible defaults; you shouldn't need to set any of them.
 
 | Command                                | What it does                                                                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `swrag sql [SQL]`                      | Run SQL via sqlite3 (default: list mode). Omit SQL to open the REPL. Pass `-` to read from stdin.                       |
+| `swrag sql [SQL]`                      | Run SQL via sqlite3 (default: list mode). Pass SQL as a positional, pipe it (`echo "…" \| swrag sql`, `swrag sql < file.sql`), pass `-` to read stdin, or omit it to open the REPL. |
 | `swrag index`                          | Ingest changes from Super Whisper now.                                                                                  |
 | `swrag bootstrap`                      | One-shot post-install: start ollama, pull `bge-m3`, install the watch agent, index, install the agent skill, verify. Safe to re-run. |
 | `swrag doctor`                         | Verify the environment.                                                                                                 |
 | `swrag path [archive\|sqlite3\|vec0]`  | Print a filesystem path. Default: `archive`.                                                                            |
-| `swrag embed "TEXT"`                   | Print the embedding of `TEXT` as a SQLite blob literal (`x'…'`), for shell composition.                                 |
+| `swrag embed "TEXT"`                   | Print the embedding of `TEXT` as a SQLite blob literal (`x'…'`), for shell composition. Accepts a positional, `-`, or a pipe (`echo "it's" \| swrag embed`) — the pipe/heredoc form avoids shell-quoting hazards for text with quotes, `$`, or backticks. |
 | `swrag install-skill`                  | Install the manual-invocation `SKILL.md` to Cursor and Claude Code.                                                     |
 | `swrag watch`                          | Run the event-driven watch daemon in the foreground (intended for launchd).                                             |
 | `swrag enable-watch` / `disable-watch` | Manage the launchd watch agent.                                                                                         |
@@ -233,6 +233,39 @@ swrag sql -- -cmd ".parameter set :app 'Cursor'" \
 swrag sql -- -json "SELECT folder_name,
                            vec_distance_cosine(embedding, $(swrag embed 'hello')) AS d
                     FROM recording_vec ORDER BY d LIMIT 5"
+```
+
+## Piping SQL & embeddings (quoting-safe)
+
+`swrag sql` and `swrag embed` both read from stdin. A **quoted heredoc**
+(`<<'EOF'`) disables all shell expansion, so SQL or embed text containing
+quotes, `$`, or backticks lands verbatim — no escaping to forget. This is
+the recommended path for anything non-trivial (and for arbitrary user
+speech, which is full of apostrophes):
+
+```bash
+# Pipe SQL — only SQL-standard '' doubling needed for string literals.
+swrag sql <<'SQL'
+SELECT folder_name, datetime_iso FROM recording
+WHERE raw_transcript LIKE '%don''t%' AND superseded_by IS NULL
+ORDER BY datetime_iso DESC LIMIT 10;
+SQL
+
+# Quoting-safe semantic search: embed via stdin, interpolate the blob.
+QV=$(swrag embed <<'EOF'
+how do notifications work when I say "don't"
+EOF
+)
+swrag sql "SELECT folder_name, vec_distance_cosine(embedding, $QV) AS d
+           FROM recording_vec ORDER BY d LIMIT 5"
+```
+
+To combine piped SQL with sqlite3 flags, put `-` before the `--` tail:
+
+```bash
+swrag sql - -- -json <<'SQL'
+SELECT folder_name, datetime_iso FROM recording LIMIT 5
+SQL
 ```
 
 If you'd rather bypass `swrag sql` entirely (e.g. to script around it),

@@ -9,11 +9,23 @@ export interface EmbedOptions {
 /**
  * Compute an embedding and emit it as a SQLite blob literal (`x'…'`).
  *
- * Designed for shell composition with `swrag sql`:
+ * Designed for shell composition with `swrag sql`. The quoting-safe form
+ * reads the text from stdin (a quoted heredoc disables all shell
+ * expansion), captures the blob in a variable, and interpolates that
+ * variable into the SQL — the blob is hex + `x''`, so it carries no
+ * shell metacharacters:
  *
+ *   QV=$(swrag embed <<'EOF'
+ *   text with 'apostrophes', $vars, and `backticks`
+ *   EOF
+ *   )
  *   swrag sql "SELECT folder_name FROM recording_vec
- *              ORDER BY vec_distance_cosine(embedding, $(swrag embed 'hello'))
+ *              ORDER BY vec_distance_cosine(embedding, $QV)
  *              LIMIT 10"
+ *
+ * The inline form is still fine for simple text with no metacharacters:
+ *
+ *   swrag sql "… vec_distance_cosine(embedding, $(swrag embed 'hello')) …"
  *
  * Or with raw sqlite3:
  *

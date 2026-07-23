@@ -162,3 +162,81 @@ describe("swrag sql -- conflict detection (subprocess)", () => {
     expect(r.stderr).toMatch(/cannot combine inline SQL.*--.*passthrough/);
   });
 });
+
+/**
+ * Stdin input: `swrag sql` and `swrag embed` both read from a pipe. These
+ * run the citty entry point as a child process with piped stdin, because
+ * the resolution logic (no positional + piped stdin → read stdin) lives
+ * in `cli.ts` and depends on `process.stdin.isTTY`, which only behaves
+ * correctly under a real subprocess.
+ */
+describe("swrag sql / embed — stdin input (subprocess)", () => {
+  function cliEnv(overrides: Record<string, string> = {}): Record<string, string> {
+    return {
+      ...process.env,
+      SWRAG_SOURCE_DB: env.sourceDb,
+      SWRAG_SOURCE_DIR: env.sourceDir,
+      SWRAG_ARCHIVE: env.archive,
+      SWRAG_SKIP_EMBED: "1",
+      SWRAG_QUIET: "0",
+      ...overrides,
+    };
+  }
+
+  async function runCliWithStdin(
+    args: string[],
+    stdin: string,
+    envOverrides: Record<string, string> = {},
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const proc = Bun.spawn({
+      cmd: ["bun", "run", CLI_ENTRY, ...args],
+      env: cliEnv(envOverrides),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write(stdin);
+    await proc.stdin.end();
+    const exitCode = await proc.exited;
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    return { exitCode, stdout, stderr };
+  }
+
+  test("swrag sql reads SQL piped via stdin (no positional, no --)", async () => {
+    const r = await runCliWithStdin(["sql"], "SELECT 'piped' AS x");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("piped");
+  });
+
+  test("swrag sql - -- -json reads piped SQL and forwards the flag", async () => {
+    const r = await runCliWithStdin(["sql", "-", "--", "-json"], "SELECT 'piped' AS x");
+    expect(r.exitCode).toBe(0);
+    const parsed: unknown = JSON.parse(r.stdout);
+    expect((parsed as { x: string }[])[0]).toEqual({ x: "piped" });
+  });
+
+  test("swrag embed reads text piped via stdin and emits a blob literal", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ embeddings: [[0.5, 0.25, 0.125]] }),
+    });
+    try {
+      const host = server.url.toString().replace(/\/$/, "");
+      const r = await runCliWithStdin(["embed"], "hello world", {
+        SWRAG_OLLAMA_HOST: host,
+        SWRAG_EMBED_MODEL: "test-model",
+      });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toMatch(/^x'[0-9a-f]+'\n$/);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("swrag embed errors on empty stdin", async () => {
+    const r = await runCliWithStdin(["embed"], "");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/no text to embed/);
+  });
+});
