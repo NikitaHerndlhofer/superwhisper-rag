@@ -234,11 +234,11 @@ conversation by joining `chunk`→`message`→`conversation`.
 
 ### Hook set (Cursor; Claude Code / Codex analogous via their own hook systems)
 
-| Hook            | Payload field used                                       | acrag action                                                                                                                                          |
-| --------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stop`          | `transcript_path` (+ `conversation_id`)                 | **background** `ingestFile(transcript_path)` — primary per-turn ingest                                                                                |
-| `subagentStop`  | `agent_transcript_path` (+ `subagent_id`)                | **background** `ingestFile(agent_transcript_path)` as a **separate conversation**, `parent_conversation_id` resolved from the `subagentStart` mapping |
-| `workspaceOpen` | (none — scans dirs)                                      | **background sweep** (`acrag index`) — catches crashes, edits, missed turns, and any new transcripts                                                  |
+| Hook            | Payload field used                        | acrag action                                                                                                                                          |
+| --------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stop`          | `transcript_path` (+ `conversation_id`)   | **background** `ingestFile(transcript_path)` — primary per-turn ingest                                                                                |
+| `subagentStop`  | `agent_transcript_path` (+ `subagent_id`) | **background** `ingestFile(agent_transcript_path)` as a **separate conversation**, `parent_conversation_id` resolved from the `subagentStart` mapping |
+| `workspaceOpen` | (none — scans dirs)                       | **background sweep** (`acrag index`) — catches crashes, edits, missed turns, and any new transcripts                                                  |
 
 `subagentStart` is used only to record the `subagent_id → parent_conversation_id` mapping (and
 `subagent_type`, `task`) into a small local state table so `subagentStop` can link the subagent
@@ -249,25 +249,44 @@ searchable.)
 **No** `sessionStart` / `sessionEnd` hooks — neither does useful work for ingest. `stop` already
 fires per turn with the complete exchange.
 
-### Transcript parsing (Cursor JSONL)
+### Transcript parsing — extensible & version-aware
 
-Cursor transcripts are JSONL (one event per line) under `workspaceStorage`. A turn is a _tree of
-typed segments_, not a text blob. The parser (lives in `acrag` — agent-specific) produces typed
-segments that feed the core's `chunkSegments`:
+Each agentic coding app (Cursor, Claude Code, Codex, OpenCode) writes transcripts in its own
+JSON/JSONL format, and each app's format evolves across versions. Parsing is therefore a
+**pluggable, version-aware layer** in `acrag` (not the core — agent-specific). All parsers emit
+the same internal shape (`ParsedTranscript` → typed segments), so the downstream `ingestFile` /
+`chunkSegments` / embedding pipeline is shared regardless of source.
 
-- **Stream line-by-line.** A single tool-result line can be MBs; cap line size, skip malformed lines
-  (append races during active writes), never load the whole file into memory at once.
-- **Emit typed segments**: `{role, kind: text|thinking|code|tool_call|tool_result|diff|subagent,
-  content, tool_name, tool_call_id, timestamp, agent_transcript_path?}`.
-- **Extract structure**: `conversation_id`, per-message `role`/`seq`/`content`/timestamps, tool
-  calls + results, thinking blocks, diffs, attachments, subagent references (for
-  `parent_conversation_id` linking).
-- **Derive `repository`** from `workspace_roots` (git remote origin URL → repo name, else the
-  workspace basename). Apply dynamic **tags** (e.g. `background`) from hook metadata into
-  `conversation_tag` — never hardcode agent-specific booleans on the conversation row.
-- **Schema-drift robustness** (biggest Cursor-path risk): Cursor's JSONL schema evolves across
-  versions → version-detect, ignore unknown fields, fail soft (log + skip a line, don't abort the
-  whole file). Build and test the parser against a captured sample from the user's real install.
+**Architecture:**
+
+- **Parser interface** — every parser implements:
+  - `detect(sample): { agent, version } | null` — sniff a sample (first lines / a marker field)
+    to identify agent + version without committing.
+  - `parse(file): ParsedTranscript` — stream the file → typed segments + conversation metadata.
+- **Registry** — an ordered list of parser descriptors `{ agent, versionRange, detect, parse }`.
+  At ingest: identify the agent (from `agent_name`/source path), `detect` the version from the
+  file, then select the matching parser. Selection is by `(agent, versionRange)`; first match wins.
+- **One module per (agent, version)** — `parsers/cursor/v1.ts`, `parsers/cursor/v2.ts`,
+  `parsers/claude-code/v1.ts`, … Each isolated, registered in one place, fixture-tested against a
+  captured sample. Adding a new agent or version = add one file + one registry line.
+- **Version detection** — look for an explicit version/schema-marker field in the JSON; if absent,
+  fall back to structural heuristics (presence/shape of certain fields). Pin the detected version
+  (log it) so re-ingest is deterministic and a drift is visible.
+- **Fallback** — if no parser matches, use a generic best-effort parser (extract whatever
+  role/text fields it can) + fail soft (skip malformed lines, never abort the whole file). Log the
+  unknown format so a parser can be added later.
+- **Fixture tests** — each parser has a canary test against a captured (anonymized) sample; a
+  schema-drift canary warns when a real transcript no longer matches any registered parser.
+
+**Cursor (first implementation):** JSONL under `workspaceStorage`; a turn is a _tree of typed
+segments_, not a text blob. The Cursor parser streams line-by-line (a single tool-result line can
+be MBs → cap line size, skip malformed lines from append races, never load the whole file into
+memory), emits typed segments `{role, kind: text|thinking|code|tool_call|tool_result|diff|subagent,
+content, tool_name, tool_call_id, timestamp, agent_transcript_path?}`, extracts `conversation_id` +
+per-message `role`/`seq`/`content`/timestamps + tool calls/results + thinking + diffs + attachments
++ subagent references (for `parent_conversation_id`), derives `repository` from `workspace_roots`
+(git remote origin → repo name, else workspace basename), and applies dynamic **tags** (e.g.
+`background`) from hook metadata into `conversation_tag`.
 
 ### Non-blocking, always
 
@@ -366,6 +385,27 @@ Proposed recipe set (slug — purpose):
 `acrag sql` and `acrag embed` take input via **stdin only** (same pipe-only convention as `swrag`),
 avoiding shell-quoting issues. `acrag embed` returns a vec literal suitable for `vec_search`/`vec0`.
 
+### Retrieval workflow (subagent-driven)
+
+`acrag`'s `SKILL.md` recommends a **subagent-driven retrieval** pattern to keep big
+conversations out of the main context window:
+
+1. The main agent, when it needs the archive, dispatches a **subagent** (Task tool) with the
+   question/intent — it does not pull raw chunks into the main chat.
+2. The subagent runs the `semantic` recipe (the **primary** search mode — best for "find where we
+   discussed X"), reads the top hits, expands each to its **neighboring turns** via the `context` /
+   `thread` recipes (loading **multiple messages** around the hit, not an isolated chunk), reads
+   through those (which may be large — tool dumps, long threads), and **summarizes** a focused
+   answer back to the main agent, with citations (`conversation_id`, `seq` ranges, `repository`).
+3. The main agent uses the summary; if it needs more detail it dispatches another subagent with a
+   narrower query.
+
+Why: a single chat can be huge (hundreds of turns, MBs of tool output). Pulling raw chunks into the
+main context fills the window and loses the surrounding story. A subagent does the heavy reading
+and returns only the synthesis. `keyword` / `fuzzy` / `hybrid` remain available for exact-token
+lookups (function names, error strings, file paths); `semantic` is the default for conceptual
+recall.
+
 ## 10. `swrag` refactor (consume the core)
 
 1. Extract `chunkText` + tokenizer config + `embed` + `openArchive` (parameterized) + migration
@@ -386,9 +426,10 @@ avoiding shell-quoting issues. `acrag embed` returns a vec literal suitable for 
    core works before `acrag` is built on it.)
 3. **`acrag` skeleton** — repo, schema + migrations, `openArchive` wiring, `acrag sql`/`acrag embed`
    stdin pipe, minimal `SKILL.md`.
-4. **`acrag` ingest** — Cursor JSONL parser (typed segments, schema-drift-robust), `ingestFile`
+4. **`acrag` ingest** — pluggable version-aware parser registry (Cursor first; one module per
+   agent+version, fixture-tested), `ingestFile`
    pipeline, segment-aware chunking via `chunkSegments` (per-turn + sub-chunk, `chunk_type` tagged),
-   embedding (both roles, large-tool-result truncation), FTS5/vec sync.
+   embedding (both roles; large segments split, never truncated), FTS5/vec sync.
 5. **`acrag` hooks** — `acrag hook stop|subagentStop|workspaceOpen`, generated `hooks.json`, detached
    background ingest, `subagentStart` mapping table.
 6. **`acrag` sweep** — `acrag index` (scan, hash, ingest/supersede, parent-link derivation).
@@ -417,3 +458,10 @@ avoiding shell-quoting issues. `acrag embed` returns a vec literal suitable for 
 - **Embedding cost on backfill** — first sweep embeds all history (could be thousands of turns).
   Acceptable one-time cost; run in background. Consider a `--limit`/`--since` flag on `acrag index`
   for incremental backfill.
+- **Reranking (follow-up, not v1)** — an optional `acrag rerank` post-retrieval pipe stage calling
+  Ollama's `/api/rerank` with a bge-family cross-encoder (`bge-reranker-v2-m3`) can improve top-K
+  precision and unify hybrid score fusion. Deferred from v1: base recipes stay pure SQL +
+  sqlite-vec + bge-m3, with RRF for `hybrid`. Caveat (July 2026): Ollama's `/api/rerank` endpoint is
+  still landing (PR #11389 / #14172) and not in a standard release; the reranker needs a custom GGUF
+  + Modelfile (no first-class `ollama pull` yet). Design `acrag rerank` to degrade gracefully
+  (pass rows through unchanged + warn) when Ollama/the model is unavailable.
