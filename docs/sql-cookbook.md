@@ -12,7 +12,7 @@ delimited by the `swrag:cookbook` HTML comments.
 > - Output is **sqlite3's default list mode** (pipe-separated, no header).
 >   For JSON, CSV, or any other mode, see "Other output modes" below.
 > - There is **no `embed(:q)`** or `--param`. For semantic search,
->   compose with the shell: `$(swrag embed 'your text')` expands to a
+>   compose with the shell: `$(echo 'your text' | swrag embed)` expands to a
 >   `x'…'` blob literal before SQL is parsed. For text containing quotes,
 >   `$`, or backticks, use the **stdin** form (see "Quoting-safe semantic
 >   search" below) — a quoted heredoc disables shell expansion entirely.
@@ -96,12 +96,15 @@ LIMIT 10;
 -- MATCH syntax: 'bullmq', '"corporate group"', 'notif*', 'bull NEAR queue'
 
 -- 4. Semantic search (any language) — shell composition via swrag embed.
---    Run from a shell:
---      swrag sql "<query below, with $(swrag embed ...) interpolated>"
+--    Run from a shell, piping the SQL in (the $(echo '…' | swrag embed) expands
+--    in a subshell with its own stdin, so it splices into the heredoc body):
+--      swrag sql <<SQL
+--      <query below, with $(echo '…' | swrag embed) interpolated>
+--      SQL
 SELECT r.folder_name, r.datetime_iso, r.mode_name,
        COALESCE(r.processed_transcript, r.raw_transcript) AS transcript,
        vec_distance_cosine(v.embedding,
-                           $(swrag embed 'how do notifications work')) AS dist
+                           $(echo 'how do notifications work' | swrag embed)) AS dist
 FROM recording_vec v
 JOIN recording r USING (folder_name)
 WHERE r.superseded_by IS NULL
@@ -111,7 +114,7 @@ LIMIT 10;
 -- 5. Semantic + structured filter
 SELECT r.folder_name, r.datetime_iso, r.app_name,
        vec_distance_cosine(v.embedding,
-                           $(swrag embed 'how do notifications work')) AS dist
+                           $(echo 'how do notifications work' | swrag embed)) AS dist
 FROM recording_vec v
 JOIN recording r USING (folder_name)
 WHERE r.superseded_by IS NULL
@@ -124,8 +127,8 @@ LIMIT 10;
 --    Capture the search term once so we don't embed twice:
 --
 --      Q="how do notifications work"
---      QV=$(swrag embed "$Q")
---      swrag sql "$(cat <<SQL
+--      QV=$(echo "$Q" | swrag embed)
+--      swrag sql <<SQL
 --        WITH kw AS (
 --          SELECT recording_fts.rowid AS rid,
 --                 ROW_NUMBER() OVER (ORDER BY bm25(recording_fts)) AS r
@@ -147,7 +150,6 @@ LIMIT 10;
 --          AND (kw.r IS NOT NULL OR vec.r IS NOT NULL)
 --        ORDER BY rrf DESC LIMIT 10
 --      SQL
---      )"
 
 -- 7. Daily dictation volume by mode
 SELECT date(datetime_iso) AS day, mode_name, COUNT(*) AS n,
@@ -223,7 +225,7 @@ ORDER BY r.datetime_iso DESC;
 WITH ranked AS (
   SELECT chunk_id,
          vec_distance_cosine(embedding,
-                             $(swrag embed 'how do notifications work')) AS dist
+                             $(echo 'how do notifications work' | swrag embed)) AS dist
   FROM recording_chunk_vec
   ORDER BY dist LIMIT 50
 ),
@@ -249,7 +251,7 @@ ORDER BY best.dist LIMIT 5;
 WITH hit AS (
   SELECT c.folder_name, c.chunk_idx,
          vec_distance_cosine(v.embedding,
-                             $(swrag embed 'how do notifications work')) AS dist
+                             $(echo 'how do notifications work' | swrag embed)) AS dist
   FROM recording_chunk_vec v
   JOIN recording_chunk c ON c.id = v.chunk_id
   JOIN recording r ON r.folder_name = c.folder_name
@@ -282,8 +284,8 @@ ORDER BY bm25 LIMIT 20;
 --
 --     Same shell pattern as recipe 6:
 --       Q="pricing"
---       QV=$(swrag embed "$Q")
---       swrag sql "$(cat <<SQL
+--       QV=$(echo "$Q" | swrag embed)
+--       swrag sql <<SQL
 --         WITH kw AS (
 --           SELECT recording_chunk_fts.rowid AS chunk_id,
 --                  ROW_NUMBER() OVER (ORDER BY bm25(recording_chunk_fts)) AS r
@@ -305,7 +307,6 @@ ORDER BY bm25 LIMIT 20;
 --           AND (kw.r IS NOT NULL OR vec.r IS NOT NULL)
 --         ORDER BY rrf DESC LIMIT 10
 --       SQL
---       )"
 
 -- 18. Filter-then-retrieve at chunk granularity. Common shape: "in
 --     <mode>/<app>/<date range>, find the moment where I said X."
@@ -323,7 +324,7 @@ WITH eligible_chunks AS (
 )
 SELECT e.folder_name, e.chunk_idx, e.text,
        vec_distance_cosine(v.embedding,
-                           $(swrag embed 'pricing tier discussion')) AS dist
+                           $(echo 'pricing tier discussion' | swrag embed)) AS dist
 FROM recording_chunk_vec v
 JOIN eligible_chunks e ON e.chunk_id = v.chunk_id
 ORDER BY dist LIMIT 10;
@@ -338,7 +339,7 @@ ORDER BY dist LIMIT 10;
 --     back to their row-level embedding. The `via` column reports which
 --     path each row took — handy for debugging, or for restricting to
 --     chunk-only matches when you specifically want long-form recall.
-WITH q AS (SELECT $(swrag embed 'how do notifications work') AS qv),
+WITH q AS (SELECT $(echo 'how do notifications work' | swrag embed) AS qv),
      chunk_best AS (
        SELECT c.folder_name,
               MIN(vec_distance_cosine(v.embedding, q.qv)) AS dist
@@ -374,20 +375,24 @@ LIMIT 10;
 
 ## Semantic search via `swrag embed`
 
-`swrag embed 'text'` calls Ollama once and prints a SQLite blob literal
-(`x'…'`) on stdout. The shell substitutes it into your SQL before the
-SQL is ever parsed. From `swrag sql`'s perspective the SQL is just a
-string with a blob literal in it.
+`swrag embed` reads text from stdin and calls Ollama once, printing a SQLite
+blob literal (`x'…'`) on stdout. The shell substitutes it into your SQL
+before the SQL is ever parsed. From `swrag sql`'s perspective the SQL is just
+a string with a blob literal in it.
 
 ```bash
-# Single-shot semantic search:
-swrag sql "SELECT folder_name, vec_distance_cosine(embedding,
-                                                   $(swrag embed 'hello'))
-           FROM recording_vec ORDER BY 2 LIMIT 5"
+# Single-shot semantic search: pipe the SQL in; the $(echo '…' | swrag embed)
+# runs in a subshell with its own stdin and splices the blob into the heredoc.
+swrag sql <<SQL
+SELECT folder_name, vec_distance_cosine(embedding, $(echo 'hello' | swrag embed)) AS d
+FROM recording_vec ORDER BY d LIMIT 5;
+SQL
 
 # Reuse the same vector twice (FTS + vec hybrid):
-QV=$(swrag embed 'how do notifications work')
-swrag sql "<...query using $QV in two places...>"
+QV=$(echo 'how do notifications work' | swrag embed)
+swrag sql <<SQL
+<...query using $QV in two places...>
+SQL
 ```
 
 There is no in-SQL `embed()` function. The composition happens entirely
@@ -395,40 +400,41 @@ at the shell layer.
 
 ### Quoting-safe semantic search (use this for arbitrary user text)
 
-The inline `$(swrag embed '…')` form is fine for simple text, but the
-embed text sits inside a double-quoted SQL string, so it **is**
-shell-evaluated: apostrophes (`don't`, `it's`), `$`, and backticks break
-it or inject. For arbitrary user speech, read the text from **stdin**
-with a quoted heredoc — `<<'EOF'` disables all shell expansion, so the
-text lands verbatim — then interpolate the resulting blob variable into
-the SQL. The blob is hex plus `x''`, so it carries no shell
-metacharacters and is safe to interpolate:
+The inline `$(echo '…' | swrag embed)` form is fine for simple text, but the
+embed text is shell-evaluated inside the `echo` argument, so apostrophes
+(`don't`, `it's`), `$`, and backticks need quoting. For arbitrary user
+speech, read the text from **stdin** with a quoted heredoc — `<<'EOF'`
+disables all shell expansion, so the text lands verbatim — then interpolate
+the resulting blob variable into the SQL. The blob is hex plus `x''`, so it
+carries no shell metacharacters and is safe to interpolate:
 
 ```bash
 QV=$(swrag embed <<'EOF'
 how do notifications work when I say "don't" and $HOME stuff
 EOF
 )
-swrag sql "SELECT r.folder_name, r.datetime_iso,
-                 vec_distance_cosine(v.embedding, $QV) AS dist
-          FROM recording_vec v JOIN recording r USING (folder_name)
-          WHERE r.superseded_by IS NULL
-          ORDER BY dist LIMIT 10"
+swrag sql <<SQL
+SELECT r.folder_name, r.datetime_iso,
+       vec_distance_cosine(v.embedding, $QV) AS dist
+FROM recording_vec v JOIN recording r USING (folder_name)
+WHERE r.superseded_by IS NULL
+ORDER BY dist LIMIT 10;
+SQL
 ```
 
-`swrag embed` accepts text three ways: a positional (`swrag embed 'hi'`),
-`-` (`swrag embed -`), or a pipe (`echo 'hi' | swrag embed`,
-`swrag embed < file.txt`). The pipe/heredoc form is the one to reach for
-whenever the text isn't under your direct control.
+`swrag embed` reads text from stdin only: a pipe (`echo 'hi' | swrag embed`)
+or a quoted heredoc (`swrag embed <<'EOF' … EOF`). The heredoc is the one to
+reach for whenever the text isn't under your direct control.
 
 ## Piping SQL via stdin
 
-`swrag sql` reads SQL from a positional argument, from stdin, or from the
-`--` tail. Given nothing on a TTY it errors (no REPL — agents should never
-hang on a TTY). **Stdin is the quoting-safe path** for any SQL containing
-single quotes, `$`, or backticks — a quoted heredoc (`<<'SQL'`) disables all
-shell expansion, so the SQL is literal and you only need SQL-standard `''`
-doubling for string literals:
+`swrag sql` reads SQL from stdin — a pipe (`echo "…" | swrag sql`), a quoted
+heredoc (`swrag sql <<'SQL' … SQL`), or a file redirect (`swrag sql < f.sql`).
+To forward sqlite3 flags, put them after `--` (`echo "…" | swrag sql -- -json`).
+Given nothing on a TTY it errors. **Stdin is the quoting-safe path** for any
+SQL containing single quotes, `$`, or backticks — a quoted heredoc (`<<'SQL'`)
+disables all shell expansion, so the SQL is literal and you only need
+SQL-standard `''` doubling for string literals:
 
 ```bash
 # Pipe SQL (no shell escaping to worry about):
@@ -443,25 +449,19 @@ SQL
 # Same thing via echo / a file:
 echo "SELECT folder_name FROM recording LIMIT 5" | swrag sql
 swrag sql < query.sql
-
-# Explicit '-' also reads stdin:
-swrag sql - <<'SQL'
-…
-SQL
 ```
 
-Combine piped SQL with sqlite3 flags by putting `-` before the `--` tail
-(SQL from stdin, flags from the tail):
+Combine piped SQL with sqlite3 flags by putting the flags after `--`
+(SQL from stdin, flags forwarded to sqlite3):
 
 ```bash
-swrag sql - -- -json <<'SQL'
-SELECT folder_name, datetime_iso FROM recording LIMIT 5
+swrag sql -- -json <<'SQL'
+SELECT folder_name, datetime_iso FROM recording LIMIT 5;
 SQL
 ```
 
-(`echo "…" | swrag sql -- -json` without the `-` is rejected — the `--`
-tail owns the SQL slot, so be explicit with `-` when you want stdin to
-provide it.)
+(`echo "…" | swrag sql -- -json` works the same way — the SQL comes from
+stdin, the `--` tail carries the flags.)
 
 ## Other output modes (and any other sqlite3 flag)
 
@@ -471,14 +471,14 @@ provide it.)
 everything past the `--` is forwarded to sqlite3 verbatim:
 
 ```bash
-swrag sql -- -json    "SELECT folder_name FROM recording LIMIT 5"
-swrag sql -- -csv     "<sql>"
-swrag sql -- -cmd ".mode markdown" "<sql>"
-swrag sql -- -box     "<sql>"
+echo "SELECT folder_name FROM recording LIMIT 5" | swrag sql -- -json
+echo "<sql>" | swrag sql -- -csv
+echo "<sql>" | swrag sql -- -cmd ".mode markdown"
+echo "<sql>" | swrag sql -- -box
 
 # Named-parameter binding via sqlite3's .parameter set
-swrag sql -- -cmd ".parameter set :app 'Cursor'" \
-             "SELECT folder_name FROM recording WHERE app_name = :app LIMIT 5"
+echo "SELECT folder_name FROM recording WHERE app_name = :app LIMIT 5" | \
+  swrag sql -- -cmd ".parameter set :app 'Cursor'"
 ```
 
 If you'd rather bypass `swrag sql` entirely (e.g. when scripting),
@@ -502,6 +502,8 @@ sqlite3 "$(swrag path)" \
 - **Append-only schema.** The archive raises on `DELETE FROM recording`
   (a `BEFORE DELETE` trigger). Use `source_deleted_at` to model "Super
   Whisper deleted this row" rather than actually deleting it.
-- **Quoting.** When you inline user-provided strings into SQL via the
-  shell, mind your quotes: `swrag sql "WHERE col = 'don''t'"` (double
-  the inner single quote, SQL-standard escaping).
+- **Quoting.** With a quoted heredoc (`<<'SQL'`) the shell does no expansion,
+  so you only need SQL-standard `''` doubling for string literals — no shell
+  escaping to worry about:
+  `swrag sql <<'SQL' … WHERE col = 'don''t' … SQL` (double the inner single
+  quote).

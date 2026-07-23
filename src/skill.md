@@ -14,35 +14,49 @@ is sqlite3 list mode (pipe-separated, no header).
 
 ## Input
 
+Pipe SQL via stdin. A quoted heredoc (`<<'SQL'`) disables shell expansion —
+the SQL is literal, no escaping to forget:
+
 ```bash
-# Pipe SQL via stdin (quoting-safe — a quoted heredoc disables shell expansion):
 swrag sql <<'SQL'
 SELECT folder_name, datetime_iso FROM recording
 WHERE superseded_by IS NULL ORDER BY datetime_iso DESC LIMIT 5;
 SQL
 
-# Or positional (trivial queries):  swrag sql "SELECT folder_name FROM recording LIMIT 5"
-# Forward flags; pipe SQL with `-`: swrag sql - -- -json <<'SQL' … SQL
+# Or a pipe:        echo "SELECT folder_name FROM recording LIMIT 5" | swrag sql
+# Or a file:        swrag sql < query.sql
+# Forward sqlite3 flags (e.g. JSON):  echo "…" | swrag sql -- -json
 ```
 
 ## Semantic search
 
-No in-SQL `embed()`. `swrag embed` prints a SQLite blob literal (`x'…'`).
-For arbitrary user speech (apostrophes, `$`, backticks), embed via stdin and
-interpolate the blob variable — it's hex plus `x''`, so it's safe:
+No in-SQL `embed()`. `swrag embed` reads text from stdin and prints a SQLite
+blob literal (`x'…'`). Inline it via command substitution — the `$(…)`
+subshell has its own stdin, so it composes cleanly inside a SQL heredoc:
+
+```bash
+swrag sql <<SQL
+SELECT r.folder_name, vec_distance_cosine(v.embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
+FROM recording_vec v JOIN recording r USING (folder_name)
+WHERE r.superseded_by IS NULL ORDER BY dist LIMIT 10
+SQL
+```
+
+For text with apostrophes, quotes, `$`, or backticks, embed via a quoted
+heredoc instead (expansion off → literal text), then interpolate the blob
+variable — it's hex plus `x''`, so it's safe:
 
 ```bash
 QV=$(swrag embed <<'EOF'
 how do notifications work when I say "don't"
 EOF
 )
-swrag sql "SELECT r.folder_name, vec_distance_cosine(v.embedding, $QV) AS dist
+swrag sql <<SQL
+SELECT r.folder_name, vec_distance_cosine(v.embedding, $QV) AS dist
 FROM recording_vec v JOIN recording r USING (folder_name)
-WHERE r.superseded_by IS NULL ORDER BY dist LIMIT 10"
+WHERE r.superseded_by IS NULL ORDER BY dist LIMIT 10
+SQL
 ```
-
-The inline form `$(swrag embed 'simple text')` is fine for text without
-shell metacharacters.
 
 ## Schema
 
@@ -99,16 +113,16 @@ WHERE recording_fts MATCH 'bullmq' AND r.superseded_by IS NULL
 ORDER BY bm25 LIMIT 10;
 -- MATCH: 'bullmq', '"corporate group"', 'notif*', 'bull NEAR queue'
 
--- 4. Semantic search (whole-row). Use $(swrag embed '…') or $QV from stdin.
+-- 4. Semantic search (whole-row). Inline $(echo '…' | swrag embed), or $QV for special chars.
 SELECT r.folder_name, r.datetime_iso,
        COALESCE(r.processed_transcript, r.raw_transcript) AS transcript,
-       vec_distance_cosine(v.embedding, $(swrag embed 'how do notifications work')) AS dist
+       vec_distance_cosine(v.embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
 FROM recording_vec v JOIN recording r USING (folder_name)
 WHERE r.superseded_by IS NULL ORDER BY dist LIMIT 10;
 
 -- 5. Semantic + structured filter.
 SELECT r.folder_name, r.datetime_iso, r.app_name,
-       vec_distance_cosine(v.embedding, $(swrag embed 'how do notifications work')) AS dist
+       vec_distance_cosine(v.embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
 FROM recording_vec v JOIN recording r USING (folder_name)
 WHERE r.superseded_by IS NULL AND r.app_name='Cursor' AND r.mode_name_lower='universal'
 ORDER BY dist LIMIT 10;
@@ -116,7 +130,7 @@ ORDER BY dist LIMIT 10;
 
 ```sql
 -- 6. Hybrid (keyword + semantic), whole-row, RRF k=60.
---    Q="notifications"; QV=$(swrag embed "$Q"); swrag sql "$(cat <<SQL
+--    Q="notifications"; QV=$(echo "$Q" | swrag embed); swrag sql <<SQL
 WITH kw AS (SELECT recording_fts.rowid AS rid,
                    ROW_NUMBER() OVER (ORDER BY bm25(recording_fts)) AS r
             FROM recording_fts WHERE recording_fts MATCH '$Q' LIMIT 50),
@@ -131,11 +145,11 @@ LEFT JOIN kw  ON kw.rid=r.rowid
 LEFT JOIN vec USING (folder_name)
 WHERE r.superseded_by IS NULL AND (kw.r IS NOT NULL OR vec.r IS NOT NULL)
 ORDER BY rrf DESC LIMIT 10
--- SQL )"
+-- SQL
 
 -- 14. Best moment per long recording + full transcript (canonical long-form RAG).
 WITH ranked AS (SELECT chunk_id,
-                       vec_distance_cosine(embedding, $(swrag embed 'how do notifications work')) AS dist
+                       vec_distance_cosine(embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
                 FROM recording_chunk_vec ORDER BY dist LIMIT 50),
      best AS (SELECT c.folder_name, c.id AS chunk_id, c.chunk_idx, c.text, ranked.dist,
                      ROW_NUMBER() OVER (PARTITION BY c.folder_name ORDER BY ranked.dist) AS rn
@@ -148,7 +162,7 @@ WHERE best.rn=1 AND r.superseded_by IS NULL ORDER BY best.dist LIMIT 5;
 
 -- 15. Chunk + immediate neighbors (lighter context than 14).
 WITH hit AS (SELECT c.folder_name, c.chunk_idx,
-                     vec_distance_cosine(v.embedding, $(swrag embed 'how do notifications work')) AS dist
+                     vec_distance_cosine(v.embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
               FROM recording_chunk_vec v JOIN recording_chunk c ON c.id=v.chunk_id
               JOIN recording r ON r.folder_name=c.folder_name
               WHERE r.superseded_by IS NULL ORDER BY dist LIMIT 1)
@@ -169,7 +183,7 @@ ORDER BY bm25 LIMIT 20;
 
 ```sql
 -- 17. Hybrid (chunk-level) — usually beats either alone for long-form.
---     Same shell pattern as 6: Q="pricing"; QV=$(swrag embed "$Q"); swrag sql "$(cat <<SQL
+--     Same shell pattern as 6: Q="pricing"; QV=$(echo "$Q" | swrag embed); swrag sql <<SQL
 WITH kw AS (SELECT recording_chunk_fts.rowid AS chunk_id,
                    ROW_NUMBER() OVER (ORDER BY bm25(recording_chunk_fts)) AS r
             FROM recording_chunk_fts WHERE recording_chunk_fts MATCH '$Q' LIMIT 50),
@@ -183,7 +197,7 @@ LEFT JOIN kw  ON kw.chunk_id=c.id
 LEFT JOIN vec ON vec.chunk_id=c.id
 WHERE r.superseded_by IS NULL AND (kw.r IS NOT NULL OR vec.r IS NOT NULL)
 ORDER BY rrf DESC LIMIT 10
--- SQL )"
+-- SQL
 
 -- 18. Filter-then-retrieve (chunk): "in <mode>/<date range>, find the moment."
 WITH eligible AS (SELECT c.id AS chunk_id, c.folder_name, c.chunk_idx, c.text
@@ -191,12 +205,12 @@ WITH eligible AS (SELECT c.id AS chunk_id, c.folder_name, c.chunk_idx, c.text
                   WHERE r.superseded_by IS NULL AND r.mode_name_lower='meeting'
                     AND r.datetime_iso >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-90 days'))
 SELECT e.folder_name, e.chunk_idx, e.text,
-       vec_distance_cosine(v.embedding, $(swrag embed 'pricing tier discussion')) AS dist
+       vec_distance_cosine(v.embedding, $(echo 'pricing tier discussion' | swrag embed)) AS dist
 FROM recording_chunk_vec v JOIN eligible e ON e.chunk_id=v.chunk_id
 ORDER BY dist LIMIT 10;
 
 -- 19. Rank RECORDINGS by best-chunk match (short rows fall back to row-level vec).
-WITH q AS (SELECT $(swrag embed 'how do notifications work') AS qv),
+WITH q AS (SELECT $(echo 'how do notifications work' | swrag embed) AS qv),
      chunk_best AS (SELECT c.folder_name, MIN(vec_distance_cosine(v.embedding,q.qv)) AS dist
                     FROM recording_chunk c JOIN recording_chunk_vec v ON v.chunk_id=c.id, q
                     GROUP BY c.folder_name),
@@ -258,7 +272,7 @@ query if recall is poor.
 - `WHERE recording_fts MATCH …` without `r.superseded_by IS NULL` — you'll
   surface old reprocessings as duplicates.
 - `vec_distance_cosine(embedding, 'text')` — a text literal is not a vector.
-  Always shell-compose with `$(swrag embed '…')` (or `$QV`).
+  Always shell-compose with `$(echo '…' | swrag embed)` (or `$QV`).
 - `LIMIT 50` on a full-transcript recipe — meetings can be 10K+ words. Use
   `LIMIT 5` for full transcripts, `LIMIT 20` for chunk-text.
 - Reaching for `recording_chunk*` for short recordings — short rows have no
@@ -281,5 +295,5 @@ sqlite3 "$(swrag path)" \
 
 - `swrag index` — ingest from Super Whisper now.
 - `swrag path [archive|sqlite3|vec0]` — print a path for shell composition.
-- `swrag embed "text"` — print an embedding as `x'…'` (positional, `-`, or pipe).
+- `swrag embed` — print an embedding as `x'…'` (text via stdin: `echo 'text' | swrag embed`, or a quoted heredoc).
 - `swrag doctor` — verify setup.

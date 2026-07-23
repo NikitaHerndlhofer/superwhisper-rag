@@ -25,9 +25,9 @@ function defaultKeepAlive(): string {
 }
 
 /**
- * Embed a single piece of text. Used by the `swrag embed "text"` CLI
- * command, which prints the resulting vector as a SQLite blob literal
- * (`x'…'`) for shell composition (`$(swrag embed 'q')`). Shells that
+ * Embed a single piece of text. Used by the `swrag embed` CLI command (text
+ * from stdin), which prints the resulting vector as a SQLite blob literal
+ * (`x'…'`) for shell composition (`$(echo 'q' | swrag embed)`). Shells that
  * use command substitution wait for the child process to exit, so
  * there's no need to be synchronous internally; this is just a thin
  * wrapper around `embedBatch`.

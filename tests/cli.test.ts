@@ -113,13 +113,12 @@ describe("swrag sql (pure sqlite3 passthrough)", () => {
 });
 
 /**
- * These tests drive the full citty entry point as a child process,
- * because the conflict-detection that lives in `cli.ts` (inline-SQL +
- * `--` passthrough) is not exercised by calling `runSql` directly —
- * it depends on `process.argv` shape. Subprocess overhead is fine for
- * a handful of cases.
+ * These tests drive the full citty entry point as a child process, because
+ * the pipe-only positional-rejection that lives in `cli.ts` is not exercised
+ * by calling `runSql` directly — it depends on `process.argv` shape and
+ * `process.stdin.isTTY`. Subprocess overhead is fine for a handful of cases.
  */
-describe("swrag sql -- conflict detection (subprocess)", () => {
+describe("swrag sql -- pipe-only (subprocess)", () => {
   function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
     const r = Bun.spawnSync({
       cmd: ["bun", "run", CLI_ENTRY, ...args],
@@ -142,17 +141,17 @@ describe("swrag sql -- conflict detection (subprocess)", () => {
     };
   }
 
-  test("sql after `--` alone is fine — citty's positional capture must not falsely trigger the conflict", () => {
+  test("sql after `--` alone is fine — citty's positional capture must not falsely trigger rejection", () => {
     const r = runCli(["sql", "--", "-json", "SELECT 'ok' AS x"]);
     expect(r.exitCode).toBe(0);
     const parsed: unknown = JSON.parse(r.stdout);
     expect((parsed as { x: string }[])[0]).toEqual({ x: "ok" });
   });
 
-  test("inline sql alone is fine", () => {
+  test("a positional (no `--`) is rejected — pipe-only", () => {
     const r = runCli(["sql", "SELECT 'inline' AS x"]);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout.trim()).toBe("inline");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/stdin only/);
   });
 
   test("swrag sql with no SQL and no `--` errors (no REPL)", () => {
@@ -161,10 +160,10 @@ describe("swrag sql -- conflict detection (subprocess)", () => {
     expect(r.stderr).toMatch(/no SQL provided/);
   });
 
-  test("inline SQL combined with `--` passthrough errors out", () => {
+  test("a positional before `--` is rejected — pipe-only (even with a tail)", () => {
     const r = runCli(["sql", "SELECT 1", "--", "-json", "SELECT 'tail' AS x"]);
     expect(r.exitCode).toBe(2);
-    expect(r.stderr).toMatch(/cannot combine inline SQL.*--.*passthrough/);
+    expect(r.stderr).toMatch(/stdin only/);
   });
 });
 
@@ -214,11 +213,17 @@ describe("swrag sql / embed — stdin input (subprocess)", () => {
     expect(r.stdout.trim()).toBe("piped");
   });
 
-  test("swrag sql - -- -json reads piped SQL and forwards the flag", async () => {
-    const r = await runCliWithStdin(["sql", "-", "--", "-json"], "SELECT 'piped' AS x");
+  test("swrag sql -- -json reads piped SQL and forwards the flag", async () => {
+    const r = await runCliWithStdin(["sql", "--", "-json"], "SELECT 'piped' AS x");
     expect(r.exitCode).toBe(0);
     const parsed: unknown = JSON.parse(r.stdout);
     expect((parsed as { x: string }[])[0]).toEqual({ x: "piped" });
+  });
+
+  test("swrag embed rejects a positional — pipe-only", async () => {
+    const r = await runCliWithStdin(["embed", "hello world"], "");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/stdin only/);
   });
 
   test("swrag embed reads text piped via stdin and emits a blob literal", async () => {

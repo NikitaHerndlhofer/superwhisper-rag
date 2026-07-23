@@ -69,9 +69,9 @@ skill instead.
 ## What the skill teaches
 
 - The full archive schema (`recording`, `recording_fts`, `recording_vec`, `v_search`).
-- The zero-flag CLI surface: `swrag sql "<sql>"` and nothing else.
-- The semantic-search pattern: `$(swrag embed 'text')` shell composition
-  produces a `x'…'` blob literal that you paste directly into your SQL.
+- The zero-flag CLI surface: pipe SQL into `swrag sql` (`swrag sql <<'SQL' … SQL`, `echo "…" | swrag sql`) — and nothing else.
+- The semantic-search pattern: `$(echo 'text' | swrag embed)` shell composition
+  produces a `x'…'` blob literal that you splice directly into your SQL heredoc.
 - The hybrid (RRF) pattern for FTS + vector search.
 - The shell-composition escape hatch: `sqlite3 "$(swrag path)" -cmd
 ".load $(swrag path vec0) sqlite3_vec_init" "<sql>"` for any feature
@@ -110,7 +110,7 @@ surface prompt or clipboard data unless the user explicitly asks.
 
 - "What did I dictate this morning?" → cookbook recipe 1.
 - "Find meetings about BullMQ from last week." → recipes 2 + 3.
-- "Where did I talk about notifications going to the right user?" → recipe 4, with `$(swrag embed 'notifications going to the right user')` composed into the SQL.
+- "Where did I talk about notifications going to the right user?" → recipe 4, with `$(echo 'notifications going to the right user' | swrag embed)` composed into the SQL.
 - "Show me everything I dictated while in Cursor in Portuguese." → `WHERE app_name = 'Cursor' AND language = 'pt'`.
 - "How much have I talked this week?" → recipe 7.
 - "What's still in the archive that Super Whisper deleted?" → recipe 10.

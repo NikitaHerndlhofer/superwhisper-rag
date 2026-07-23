@@ -27,7 +27,7 @@ afterEach(() => {
  * End-to-end tests of the agent-facing surface.
  *
  * For semantic recipes (cookbook 4–6), the production path is shell
- * composition: the user runs `$(swrag embed 'text')` and `swrag embed`
+ * composition: the user runs `$(echo 'text' | swrag embed)` and `swrag embed`
  * shells out to Ollama via curl. To keep these tests offline we don't
  * exercise that pipeline — we instead drive the same SQL surface
  * (`vec_distance_cosine`, FTS5 `MATCH`) directly through `bun:sqlite`
@@ -70,7 +70,7 @@ describe("semantic search SQL surface (cookbook 4)", () => {
 describe("hybrid RRF cookbook query (cookbook 6, SQL shape)", () => {
   test("kw side returns rows when MATCH hits, via sqlite3 passthrough", async () => {
     // Literal-inlined query — no --param plumbing in the minimal CLI.
-    // For dynamic queries the agent uses `$(swrag embed 'text')` shell
+    // For dynamic queries the agent uses `$(echo 'text' | swrag embed)` shell
     // composition, not query parameters.
     const r = await runSql({
       sql:

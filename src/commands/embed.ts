@@ -9,29 +9,34 @@ export interface EmbedOptions {
 /**
  * Compute an embedding and emit it as a SQLite blob literal (`x'…'`).
  *
- * Designed for shell composition with `swrag sql`. The quoting-safe form
- * reads the text from stdin (a quoted heredoc disables all shell
- * expansion), captures the blob in a variable, and interpolates that
- * variable into the SQL — the blob is hex + `x''`, so it carries no
- * shell metacharacters:
+ * Designed for shell composition with `swrag sql` (both read from stdin).
+ * The quoting-safe form reads the embed text from a quoted heredoc (which
+ * disables all shell expansion), captures the blob in a variable, and
+ * interpolates that variable into the SQL heredoc — the blob is hex + `x''`,
+ * so it carries no shell metacharacters:
  *
  *   QV=$(swrag embed <<'EOF'
  *   text with 'apostrophes', $vars, and `backticks`
  *   EOF
  *   )
- *   swrag sql "SELECT folder_name FROM recording_vec
- *              ORDER BY vec_distance_cosine(embedding, $QV)
- *              LIMIT 10"
+ *   swrag sql <<SQL
+ *   SELECT folder_name FROM recording_vec
+ *   ORDER BY vec_distance_cosine(embedding, $QV)
+ *   LIMIT 10;
+ *   SQL
  *
- * The inline form is still fine for simple text with no metacharacters:
+ * The inline form is fine for simple text with no metacharacters — the
+ * `$(echo '…' | swrag embed)` runs in a subshell with its own stdin:
  *
- *   swrag sql "… vec_distance_cosine(embedding, $(swrag embed 'hello')) …"
+ *   swrag sql <<SQL
+ *   … vec_distance_cosine(embedding, $(echo 'hello' | swrag embed)) …
+ *   SQL
  *
  * Or with raw sqlite3:
  *
  *   sqlite3 "$(swrag path)" \
  *     -cmd ".load $(swrag path vec0) sqlite3_vec_init" \
- *     "SELECT ... vec_distance_cosine(embedding, $(swrag embed 'hello')) ..."
+ *     "SELECT ... vec_distance_cosine(embedding, $(echo 'hello' | swrag embed)) ..."
  */
 export async function runEmbed(opts: EmbedOptions): Promise<string> {
   const vec = await embedOne(opts.text, {

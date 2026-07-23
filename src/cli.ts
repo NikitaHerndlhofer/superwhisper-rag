@@ -12,7 +12,7 @@ import { disableWatch, enableWatch } from "./commands/enable-watch.ts";
 import { runIndex } from "./commands/index.ts";
 import { installSkill } from "./commands/install-skill.ts";
 import { getPath, PathTargetSchema } from "./commands/path.ts";
-import { runSql, readSqlInput } from "./commands/sql.ts";
+import { runSql } from "./commands/sql.ts";
 import { runWatchCommand } from "./commands/watch.ts";
 import { readAllStdin, stdinIsPiped } from "./stdin.ts";
 
@@ -101,67 +101,59 @@ const sqlCmd = defineCommand({
   meta: {
     name: "sql",
     description:
-      "Run SQL through sqlite3 (vec preloaded, archive read-only, ingest first). Pipe SQL via stdin (`echo \"…\" | swrag sql`), pass it as a positional, or forward it after `--`. Use `--` to pass sqlite3 flags.",
+      "Run SQL through sqlite3 (vec preloaded, archive read-only, ingest first). Pipe SQL via stdin (`echo \"…\" | swrag sql`, `swrag sql <<'SQL' … SQL`, `swrag sql < file.sql`). Forward sqlite3 flags with `--` (`echo \"…\" | swrag sql -- -json`). No positional — SQL is stdin-only.",
   },
   args: {
     query: {
       type: "positional",
       required: false,
       description:
-        "SQL string, '-' for stdin, or omit. With no positional and piped stdin, SQL is read from stdin; with no positional, no `--`, and a TTY, the command errors (no SQL provided).",
+        "Not used. `swrag sql` reads SQL from stdin only; a positional is rejected with an error pointing to the pipe/heredoc forms. (Kept in the schema so citty captures it for a clear error instead of a generic unknown-arg message.)",
     },
   },
   async run({ args }) {
-    const queryArg = asString(args.query);
-    const explicitStdin = queryArg === "-";
-    const inline = explicitStdin ? null : (queryArg ?? null);
     const passthrough = PASSTHROUGH_ARGS.length > 0;
 
-    // Reject `swrag sql "SQL" -- <args>`. Either form is fine on its own
-    // — inline SQL, or SQL forwarded inside the `--` tail — but combining
-    // them used to silently drop the inline SQL. Surface the conflict
-    // rather than guess which one the user wanted.
-    //
-    // Note: we cannot rely on citty's `args.query` to tell us whether
-    // the user supplied an inline positional, because citty doesn't
-    // respect `--` and will happily pull a string out of the
-    // passthrough tail and into `query`. We scan argv directly instead
-    // — see `hasInlinePositionalBeforeDashDash`.
-    if (passthrough && hasInlinePositionalBeforeDashDash("sql")) {
+    // Pipe-only: a positional before `--` (or with no `--` at all) is rejected.
+    // citty doesn't respect `--`, so when `--` is present we scan argv ourselves
+    // (`hasInlinePositionalBeforeDashDash`); without `--`, citty's `args.query`
+    // is reliable. The `--` tail may still carry SQL for sqlite3 (the raw
+    // passthrough escape hatch) — that's after `--`, so it's not "inline".
+    const hasPositional = passthrough
+      ? hasInlinePositionalBeforeDashDash("sql")
+      : asString(args.query) != null;
+    if (hasPositional) {
       error(
-        "cannot combine inline SQL with `--` passthrough. " +
-          "Put your SQL either before `--`, or inside the tail after `--` — not both. " +
-          "(To pipe SQL and still pass flags, use `swrag sql - -- <flags>`.)",
+        "swrag sql reads SQL from stdin only — a positional isn't accepted. " +
+          "Pipe it (`echo \"…\" | swrag sql`), use a heredoc (`swrag sql <<'SQL' … SQL`), " +
+          "or redirect a file (`swrag sql < file.sql`). To forward sqlite3 flags, " +
+          "use `echo \"…\" | swrag sql -- -json`.",
       );
       process.exit(2);
     }
 
     // Resolve the SQL. Precedence:
-    //   1. `swrag sql -`            → read stdin (explicit)
-    //   2. `swrag sql "SELECT …"`   → inline positional
-    //   3. `echo "…" | swrag sql`   → piped stdin (no positional, no `--`)
-    //   4. `swrag sql` (TTY)        → error — no SQL provided (no REPL;
-    //                                 agents should never hang on a TTY)
+    //   1. `echo "…" | swrag sql`        → piped stdin (no `--`)
+    //   2. `swrag sql <<'SQL' … SQL`    → heredoc stdin (no `--`)
+    //   3. `swrag sql < file.sql`        → redirected stdin (no `--`)
+    //   4. `echo "…" | swrag sql -- -json` → piped stdin + forwarded flags
+    //   5. `swrag sql -- -json "SELECT …"` → raw passthrough: tail owns the SQL slot
+    //   6. `swrag sql` (TTY, no `--`)    → error — no SQL provided
     //
-    // When `--` is present the tail owns the SQL slot, so we ignore citty's
-    // positional capture (`inline`) entirely — citty doesn't respect `--`
-    // and may stuff a tail positional into `query`. Only an explicit `-`
-    // can override the tail (the `swrag sql - -- -json` shape: SQL from
-    // stdin, flags from the tail).
+    // When `--` is present and stdin is piped, we read SQL from stdin and
+    // forward the tail as flags (case 4). When `--` is present and stdin is a
+    // TTY, the tail owns everything — sqlite3 takes SQL as its 2nd positional
+    // (case 5). buildArgs appends `sql` after `extraArgs`, which is the
+    // sqlite3-correct order (DATABASE, flags, SQL).
     let sql: string | null;
     if (passthrough) {
-      sql = explicitStdin ? (await readAllStdin()).trim() : null;
-    } else if (explicitStdin) {
-      sql = await readSqlInput(null, true);
-    } else if (inline != null) {
-      sql = inline;
+      sql = stdinIsPiped() ? (await readAllStdin()).trim() : null;
     } else if (stdinIsPiped()) {
       sql = await readAllStdin();
     } else {
       error(
-        "no SQL provided: pipe it (`echo \"…\" | swrag sql`), pass it as a " +
-          "positional (`swrag sql \"SELECT …\"`), use `-` to read stdin, " +
-          "or forward it after `--`.",
+        "no SQL provided: pipe it (`echo \"…\" | swrag sql`), use a heredoc " +
+          "(`swrag sql <<'SQL' … SQL`), or redirect a file (`swrag sql < file.sql`).",
       );
       process.exit(2);
     }
@@ -286,28 +278,33 @@ const embedCmd = defineCommand({
   meta: {
     name: "embed",
     description:
-      "Emit a SQL blob literal (x'…') of the given text's embedding. Pass text as a positional, as '-' for stdin, or pipe it (e.g. `echo \"it's\" | swrag embed`) — stdin avoids shell-quoting hazards for text containing quotes, $, or backticks.",
+      "Emit a SQL blob literal (x'…') of the given text's embedding. Pipe text via stdin (`echo 'text' | swrag embed`) or a quoted heredoc (`swrag embed <<'EOF' … EOF`) — stdin avoids shell-quoting hazards for text containing apostrophes, quotes, $, or backticks. No positional.",
   },
   args: {
     text: {
       type: "positional",
       required: false,
-      description: "Text to embed, '-' for stdin, or omit to read from a pipe",
+      description:
+        "Not used. `swrag embed` reads text from stdin only; a positional is rejected with an error pointing to the pipe/heredoc forms.",
     },
   },
   async run({ args }) {
     const arg = asString(args.text);
+    if (arg != null) {
+      error(
+        "swrag embed reads text from stdin only — a positional isn't accepted. " +
+          "Pipe it (`echo 'text' | swrag embed`) or use a quoted heredoc " +
+          "(`swrag embed <<'EOF' … EOF`) for text with apostrophes, quotes, $, or backticks.",
+      );
+      process.exit(2);
+    }
     let text: string;
-    if (arg === "-") {
-      text = (await readAllStdin()).trim();
-    } else if (arg != null) {
-      text = arg;
-    } else if (stdinIsPiped()) {
+    if (stdinIsPiped()) {
       text = (await readAllStdin()).trim();
     } else {
       error(
-        "no text to embed: pass it as a positional (`swrag embed 'hi'`), " +
-          "as '-' (`swrag embed -`), or via a pipe (`echo 'hi' | swrag embed`).",
+        "no text to embed: pipe it (`echo 'text' | swrag embed`) or use a " +
+          "quoted heredoc (`swrag embed <<'EOF' … EOF`).",
       );
       process.exit(2);
     }

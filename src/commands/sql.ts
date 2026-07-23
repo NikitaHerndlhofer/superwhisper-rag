@@ -1,7 +1,6 @@
 import { ensureFresh } from "../ingest/ingester.ts";
 import { warn } from "../log.ts";
 import { runSqlite3, type Sqlite3Result } from "../sqlite3.ts";
-import { readAllStdin } from "../stdin.ts";
 
 /**
  * Run a SQL query against the archive by exec'ing the sqlite3 CLI.
@@ -23,15 +22,17 @@ import { readAllStdin } from "../stdin.ts";
  *   b. Drive sqlite3 directly:
  *      `sqlite3 "$(swrag path)" -cmd ".load $(swrag path vec0) sqlite3_vec_init" …`
  *
- * For semantic search, compose with `swrag embed`:
+ * For semantic search, compose with `swrag embed` (text via stdin → `x'…'` blob):
  *
- *   swrag sql "SELECT folder_name
- *              FROM recording_vec
- *              ORDER BY vec_distance_cosine(embedding, $(swrag embed 'hello'))
- *              LIMIT 5"
+ *   swrag sql <<SQL
+ *   SELECT folder_name
+ *   FROM recording_vec
+ *   ORDER BY vec_distance_cosine(embedding, $(echo 'hello' | swrag embed))
+ *   LIMIT 5
+ *   SQL
  */
 export interface RunSqlOptions {
-  /** SQL to execute. `null`/empty with no passthrough is an error (no REPL). */
+  /** SQL to execute. `null`/empty with no passthrough is an error (pipe-only, no REPL). */
   sql: string | null;
   archive: string;
   sourceDb: string;
@@ -44,17 +45,6 @@ export interface RunSqlOptions {
    * pass it to sqlite3 untouched.
    */
   extraArgs?: string[];
-}
-
-/** Read SQL from stdin or use the inline argument. */
-export async function readSqlInput(
-  inline: string | null,
-  fromStdin: boolean,
-): Promise<string | null> {
-  if (fromStdin) {
-    return readAllStdin();
-  }
-  return inline;
 }
 
 export async function runSql(opts: RunSqlOptions): Promise<Sqlite3Result> {
@@ -77,9 +67,9 @@ export async function runSql(opts: RunSqlOptions): Promise<Sqlite3Result> {
   const trimmed = (opts.sql ?? "").trim();
 
   // Passthrough mode: the user wrote `swrag sql -- <args>`. `<args>` may
-  // carry sqlite3 flags and/or the SQL itself. When the caller also hands
-  // us SQL (the `swrag sql - -- -json` shape — SQL via stdin, flags via the
-  // tail), we keep both: `buildArgs` appends `sql` after `extraArgs`,
+  // carry sqlite3 flags and/or the SQL itself. When SQL also arrives via
+  // stdin (the `echo "…" | swrag sql -- -json` shape — SQL via stdin, flags
+  // via the tail), we keep both: `buildArgs` appends `sql` after `extraArgs`,
   // which is the sqlite3-correct order (DATABASE, flags, SQL).
   if (extra.length > 0) {
     return runSqlite3({
@@ -97,7 +87,7 @@ export async function runSql(opts: RunSqlOptions): Promise<Sqlite3Result> {
     return {
       exitCode: 2,
       stdout: "",
-      stderr: "no SQL provided: pipe stdin, pass a positional, or forward after `--`.",
+      stderr: "no SQL provided: pipe it via stdin (`echo \"…\" | swrag sql`).",
     };
   }
 

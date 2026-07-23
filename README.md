@@ -30,61 +30,73 @@ It's useful if you:
 ```bash
 # Today's dictations. processed_transcript = the LLM-cleaned text;
 # falls back to raw_transcript when the mode didn't run an LLM.
-swrag sql "SELECT folder_name, datetime_iso, mode_name,
-                  COALESCE(processed_transcript, raw_transcript) AS transcript
-           FROM recording
-           WHERE date(datetime_iso) = date('now','localtime')
-             AND superseded_by IS NULL
-           ORDER BY datetime_iso DESC"
+swrag sql <<'SQL'
+SELECT folder_name, datetime_iso, mode_name,
+       COALESCE(processed_transcript, raw_transcript) AS transcript
+FROM recording
+WHERE date(datetime_iso) = date('now','localtime')
+  AND superseded_by IS NULL
+ORDER BY datetime_iso DESC;
+SQL
 
 # Discover the modes you've actually used — modes are user-configurable in
 # Super Whisper, so don't assume any particular name exists.
-swrag sql "SELECT mode_name, COUNT(*) AS n
-           FROM recording
-           WHERE superseded_by IS NULL
-           GROUP BY mode_name
-           ORDER BY n DESC"
+swrag sql <<'SQL'
+SELECT mode_name, COUNT(*) AS n
+FROM recording
+WHERE superseded_by IS NULL
+GROUP BY mode_name
+ORDER BY n DESC;
+SQL
 
 # Filter by Super Whisper mode — replace 'meeting' with one of the names
 # the previous query showed. `mode_name_lower` is an indexed generated
 # column, so case-insensitive matches are cheap.
-swrag sql "SELECT folder_name, datetime_iso, duration_sec,
-                  COALESCE(processed_transcript, raw_transcript) AS transcript
-           FROM recording
-           WHERE mode_name_lower = 'meeting'
-             AND datetime_iso >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
-             AND superseded_by IS NULL
-           ORDER BY datetime_iso DESC"
+swrag sql <<'SQL'
+SELECT folder_name, datetime_iso, duration_sec,
+       COALESCE(processed_transcript, raw_transcript) AS transcript
+FROM recording
+WHERE mode_name_lower = 'meeting'
+  AND datetime_iso >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
+  AND superseded_by IS NULL
+ORDER BY datetime_iso DESC;
+SQL
 
 # Keyword search with snippets. recording_fts indexes raw_transcript and
 # processed_transcript; the -1 in snippet() lets it pick whichever column
 # matched.
-swrag sql "SELECT r.folder_name, snippet(recording_fts, -1, '«', '»', '…', 5)
-           FROM recording_fts JOIN recording r ON r.rowid = recording_fts.rowid
-           WHERE recording_fts MATCH 'bullmq' AND r.superseded_by IS NULL
-           ORDER BY bm25(recording_fts) LIMIT 10"
+swrag sql <<'SQL'
+SELECT r.folder_name, snippet(recording_fts, -1, '«', '»', '…', 5)
+FROM recording_fts JOIN recording r ON r.rowid = recording_fts.rowid
+WHERE recording_fts MATCH 'bullmq' AND r.superseded_by IS NULL
+ORDER BY bm25(recording_fts) LIMIT 10;
+SQL
 
-# Semantic search — works in any language; the shell composes the embedding
-swrag sql "SELECT r.folder_name,
-                  COALESCE(r.processed_transcript, r.raw_transcript) AS transcript,
-                  vec_distance_cosine(v.embedding,
-                                      $(swrag embed 'how do notifications work')) AS dist
-           FROM recording_vec v JOIN recording r USING (folder_name)
-           WHERE r.superseded_by IS NULL
-           ORDER BY dist LIMIT 10"
+# Semantic search — works in any language; the shell composes the embedding.
+# `$(echo '…' | swrag embed)` runs in a subshell with its own stdin, so it
+# splices cleanly into the heredoc body.
+swrag sql <<SQL
+SELECT r.folder_name,
+       COALESCE(r.processed_transcript, r.raw_transcript) AS transcript,
+       vec_distance_cosine(v.embedding, $(echo 'how do notifications work' | swrag embed)) AS dist
+FROM recording_vec v JOIN recording r USING (folder_name)
+WHERE r.superseded_by IS NULL
+ORDER BY dist LIMIT 10;
+SQL
 
 # Find the precise moment in a long meeting — chunk-level semantic search
 # returns ~300-word windows instead of "this hour-long meeting probably
 # talked about it". Recipe 14 in the cookbook joins the full transcript
 # back in for context.
-swrag sql "SELECT r.folder_name, c.chunk_idx, c.text,
-                  vec_distance_cosine(v.embedding,
-                                      $(swrag embed 'how do we price the enterprise tier')) AS dist
-           FROM recording_chunk_vec v
-           JOIN recording_chunk c ON c.id = v.chunk_id
-           JOIN recording r ON r.folder_name = c.folder_name
-           WHERE r.superseded_by IS NULL
-           ORDER BY dist LIMIT 10"
+swrag sql <<SQL
+SELECT r.folder_name, c.chunk_idx, c.text,
+       vec_distance_cosine(v.embedding, $(echo 'how do we price the enterprise tier' | swrag embed)) AS dist
+FROM recording_chunk_vec v
+JOIN recording_chunk c ON c.id = v.chunk_id
+JOIN recording r ON r.folder_name = c.folder_name
+WHERE r.superseded_by IS NULL
+ORDER BY dist LIMIT 10;
+SQL
 ```
 
 See [`docs/sql-cookbook.md`](docs/sql-cookbook.md) for the full set of
@@ -201,12 +213,12 @@ All have sensible defaults; you shouldn't need to set any of them.
 
 | Command                                | What it does                                                                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `swrag sql [SQL]`                      | Run SQL via sqlite3 (default: list mode). Pass SQL as a positional, pipe it (`echo "…" \| swrag sql`, `swrag sql < file.sql`), or forward it after `--`. No SQL → error (no REPL). |
+| `swrag sql`                            | Run SQL via sqlite3 (default: list mode). SQL comes from stdin: `echo "…" \| swrag sql`, `swrag sql <<'SQL' … SQL`, or `swrag sql < file.sql`. Forward sqlite3 flags with `--` (`echo "…" \| swrag sql -- -json`). No positional. |
 | `swrag index`                          | Ingest changes from Super Whisper now.                                                                                  |
 | `swrag bootstrap`                      | One-shot post-install: start ollama, pull `bge-m3`, install the watch agent, index, install the agent skill, verify. Safe to re-run. |
 | `swrag doctor`                         | Verify the environment.                                                                                                 |
 | `swrag path [archive\|sqlite3\|vec0]`  | Print a filesystem path. Default: `archive`.                                                                            |
-| `swrag embed "TEXT"`                   | Print the embedding of `TEXT` as a SQLite blob literal (`x'…'`), for shell composition. Accepts a positional, `-`, or a pipe (`echo "it's" \| swrag embed`) — the pipe/heredoc form avoids shell-quoting hazards for text with quotes, `$`, or backticks. |
+| `swrag embed`                          | Print the embedding of text as a SQLite blob literal (`x'…'`), for shell composition. Text comes from stdin: `echo 'text' \| swrag embed`, or a quoted heredoc (`swrag embed <<'EOF' … EOF`) — the heredoc avoids shell-quoting hazards for text with apostrophes, quotes, `$`, or backticks. |
 | `swrag install-skill`                  | Install the manual-invocation `SKILL.md` to Cursor and Claude Code.                                                     |
 | `swrag watch`                          | Run the event-driven watch daemon in the foreground (intended for launchd).                                             |
 | `swrag enable-watch` / `disable-watch` | Manage the launchd watch agent.                                                                                         |
@@ -216,23 +228,25 @@ All have sensible defaults; you shouldn't need to set any of them.
 `swrag sql` itself takes zero flags. To use any sqlite3 flag —
 `-json`, `-csv`, `-line`, `-column`, `-box`, `-markdown`, `-cmd "…"`,
 `-header`, `-separator`, etc. — put `--` after `sql` and everything
-after the `--` is forwarded to sqlite3 verbatim:
+after the `--` is forwarded to sqlite3 verbatim. Pipe the SQL in on stdin:
 
 ```bash
 # JSON output
-swrag sql -- -json "SELECT folder_name FROM recording LIMIT 5"
+echo "SELECT folder_name FROM recording LIMIT 5" | swrag sql -- -json
 
 # Markdown table for human reading
-swrag sql -- -cmd ".mode markdown" "SELECT folder_name, datetime FROM recording LIMIT 5"
+echo "SELECT folder_name, datetime FROM recording LIMIT 5" | swrag sql -- -cmd ".mode markdown"
 
 # Named parameters (sqlite3's own .parameter set)
-swrag sql -- -cmd ".parameter set :app 'Cursor'" \
-             "SELECT folder_name FROM recording WHERE app_name = :app LIMIT 5"
+echo "SELECT folder_name FROM recording WHERE app_name = :app LIMIT 5" | \
+  swrag sql -- -cmd ".parameter set :app 'Cursor'"
 
 # Compose with semantic embeddings (the `swrag embed` trick still works)
-swrag sql -- -json "SELECT folder_name,
-                           vec_distance_cosine(embedding, $(swrag embed 'hello')) AS d
-                    FROM recording_vec ORDER BY d LIMIT 5"
+swrag sql -- -json <<SQL
+SELECT folder_name,
+       vec_distance_cosine(embedding, $(echo 'hello' | swrag embed)) AS d
+FROM recording_vec ORDER BY d LIMIT 5;
+SQL
 ```
 
 ## Piping SQL & embeddings (quoting-safe)
@@ -256,15 +270,17 @@ QV=$(swrag embed <<'EOF'
 how do notifications work when I say "don't"
 EOF
 )
-swrag sql "SELECT folder_name, vec_distance_cosine(embedding, $QV) AS d
-           FROM recording_vec ORDER BY d LIMIT 5"
+swrag sql <<SQL
+SELECT folder_name, vec_distance_cosine(embedding, $QV) AS d
+FROM recording_vec ORDER BY d LIMIT 5;
+SQL
 ```
 
-To combine piped SQL with sqlite3 flags, put `-` before the `--` tail:
+To combine piped SQL with sqlite3 flags, put the flags after `--`:
 
 ```bash
-swrag sql - -- -json <<'SQL'
-SELECT folder_name, datetime_iso FROM recording LIMIT 5
+swrag sql -- -json <<'SQL'
+SELECT folder_name, datetime_iso FROM recording LIMIT 5;
 SQL
 ```
 

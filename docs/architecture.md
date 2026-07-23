@@ -70,7 +70,7 @@ src/
 │   ├── index.ts            # `swrag index`.
 │   ├── doctor.ts           # Minimal env check.
 │   ├── path.ts             # `swrag path [archive|sqlite3|vec0]`.
-│   ├── embed.ts            # `swrag embed "text"` → x'…'.
+│   ├── embed.ts            # `swrag embed` (stdin) → x'…'.
 │   ├── install-skill.ts    # Write SKILL.md to ~/.cursor and/or ~/.claude.
 │   └── enable-sync.ts      # Opt-in launchd agent (install/uninstall).
 │
@@ -89,7 +89,7 @@ src/
 1. `cli.ts` parses env vars via `EnvSchema`, resolves paths via `resolvePaths`.
 2. `commands/sql.ts::runSql`:
    1. Calls `ensureFresh()` (sub-ms fast-path in the common case; a hard failure here is downgraded to a `warn()` so the query still runs against whatever the archive already has).
-   2. Reads the SQL string (positional arg, or stdin when `-` was passed). **No tokenisation, no substitution.** The SQL is opaque to `swrag` from here on.
+   2. Reads the SQL string from stdin (pipe, heredoc, or file redirect). **No tokenisation, no substitution.** The SQL is opaque to `swrag` from here on.
    3. Builds sqlite3 args:
       - `-bail` to stop on error.
       - `-cmd ".load <vec0_path> sqlite3_vec_init"` so vector functions work.
@@ -97,9 +97,9 @@ src/
       - The user's SQL, verbatim — OR, when the user typed `swrag sql -- …`, the args after `--` are forwarded to sqlite3 verbatim (which is how you ask for JSON/CSV/markdown output, dot-commands, named-parameter binding, etc.).
    4. Spawns `/opt/homebrew/opt/sqlite/bin/sqlite3` and forwards stdout, stderr, and exit code.
 
-If `sql` is empty (the user typed `swrag sql` with no positional, no `--`, and
-no piped stdin), the command errors with "no SQL provided" — there is no REPL,
-because agents should never hang on a TTY.
+If no SQL arrives (the user typed `swrag sql` on a TTY with no `--`), the
+command errors with "no SQL provided" — SQL is stdin-only, and a positional
+is rejected with an error pointing at the pipe/heredoc forms.
 
 Semantic search composes through the shell — see "Why semantic search is shell-composed, not SQL-substituted" below.
 
@@ -227,7 +227,7 @@ build into the picture.
 We use both:
 
 - **bun:sqlite** for `swrag index` — fast in-process writes, transactions, prepared statements.
-- **sqlite3 CLI** for `swrag sql` — its output formatters (`-csv`, `-json`, `-line`, `-column`, `-box`, `-markdown`, …) are battle-tested. We were never going to do them better. (We don't expose the REPL — `swrag sql` requires SQL from a positional, stdin, or `--`.)
+- **sqlite3 CLI** for `swrag sql` — its output formatters (`-csv`, `-json`, `-line`, `-column`, `-box`, `-markdown`, …) are battle-tested. We were never going to do them better. (`swrag sql` takes SQL from stdin only — pipe, heredoc, or file redirect — and forwards sqlite3 flags after `--`.)
 
 The two share the **same `vec0.dylib`** (materialised once to tmpdir) and the **same `libsqlite3.dylib`** (Homebrew's). The Homebrew formula declares `sqlite` as a dependency, so the CLI is always present.
 
@@ -242,16 +242,17 @@ The minimal CLI does none of that. Semantic search composes through the
 shell:
 
 ```bash
-swrag sql "SELECT folder_name, vec_distance_cosine(embedding,
-                                                   $(swrag embed 'hello'))
-           FROM recording_vec ORDER BY 2 LIMIT 5"
+swrag sql <<SQL
+SELECT folder_name, vec_distance_cosine(embedding, $(echo 'hello' | swrag embed)) AS d
+FROM recording_vec ORDER BY d LIMIT 5;
+SQL
 ```
 
-`swrag embed 'text'` calls Ollama once and prints `x'aabbcc…'` (the bge-m3
-vector as a SQLite blob literal) on stdout. The shell expands it into
-the SQL string before `swrag sql` ever sees it. From `swrag sql`'s
-perspective the SQL is just an opaque string with a blob literal in it —
-no parsing, no substitution.
+`swrag embed` reads text from stdin and calls Ollama once, printing
+`x'aabbcc…'` (the bge-m3 vector as a SQLite blob literal) on stdout. The
+shell expands it into the SQL string before `swrag sql` ever sees it. From
+`swrag sql`'s perspective the SQL is just an opaque string with a blob
+literal in it — no parsing, no substitution.
 
 Net win: `swrag sql` does **zero** preprocessing of the user's SQL. It's
 the thinnest possible wrapper around `sqlite3`.
@@ -327,7 +328,7 @@ content size so the next CLI invocation skips the write.
 Every external value goes through a zod schema in `src/schemas.ts`:
 
 - Environment variables → `EnvSchema`.
-- CLI args → there are none beyond positionals (the CLI is zero-flag).
+- CLI args → there are none (the CLI is zero-flag; `sql`/`embed` read from stdin, `--` forwards to sqlite3).
 - Super Whisper DB rows → `SourceRecordingSchema`.
 - `meta.json` → `MetaJsonSchema` (loose; preserves unknown fields).
 - Ollama responses → `OllamaEmbedResponseSchema`, `OllamaTagsResponseSchema`.
