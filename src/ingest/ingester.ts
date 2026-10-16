@@ -18,9 +18,11 @@ import {
 } from "./chunker.ts";
 import {
   readMetaContext,
-  readSourceFolderNames,
+  readSourceFingerprints,
   readSourceRecordings,
+  readSourceRecordingsByFolder,
   sourceDbMtimeNs,
+  type SourceFingerprint,
 } from "./sources.ts";
 import { snapshotSourceDb } from "./snapshot.ts";
 import { markSourceDeletions, refreshAudioLiveness } from "./deletions.ts";
@@ -51,6 +53,13 @@ const ExistingChunkRowSchema = z.object({
 type ExistingChunkRow = z.infer<typeof ExistingChunkRowSchema>;
 
 const ExistsRowSchema = z.object({ folder_name: z.string() });
+
+const ArchivedFingerprintRowSchema = z.object({
+  folder_name: z.string(),
+  duration_ms: z.number().nullable(),
+  raw_word_count: z.number().nullable(),
+  llm_word_count: z.number().nullable(),
+});
 
 const AudioHashRowSchema = z.object({
   folder_name: z.string(),
@@ -160,14 +169,22 @@ export async function ensureFresh(opts: IngestOptions): Promise<IngestResult> {
       try {
         const since = getConfig(archive, "last_indexed_datetime") ?? null;
         const newRows = readSourceRecordings(snap.path, since);
-        const sourceFolders = readSourceFolderNames(snap.path);
+        const sourceFingerprints = readSourceFingerprints(snap.path);
+        const sourceFolders = new Set(sourceFingerprints.keys());
+        const rewritten = findRewrittenFolders(
+          archive,
+          sourceFingerprints,
+          new Set(newRows.map((r) => r.folderName)),
+        );
+        const sourceRows = [...newRows, ...readSourceRecordingsByFolder(snap.path, rewritten)];
         verbose(
-          `source has ${sourceFolders.size} rows total; ${newRows.length} new since ${since ?? "epoch"}`,
+          `source has ${sourceFolders.size} rows total; ${newRows.length} new since ${since ?? "epoch"}, ` +
+            `${rewritten.length} rewritten in place`,
         );
 
         const rdir = recordingsDir(opts.sourceDir);
         const upserts = await Promise.all(
-          newRows.map((row) =>
+          sourceRows.map((row) =>
             readMetaContext(rdir, row.folderName).then((meta) => ({
               row,
               meta,
@@ -304,6 +321,36 @@ export async function ensureFresh(opts: IngestOptions): Promise<IngestResult> {
 
 function recordingsDir(sourceDir: string): string {
   return join(sourceDir, "recordings");
+}
+
+/**
+ * Archived folders whose source row has changed since we indexed it but
+ * sits at or behind the `datetime` bookmark (see `readSourceFingerprints`).
+ * Folders already in this pass's bookmark read are excluded.
+ */
+function findRewrittenFolders(
+  archive: Database,
+  source: ReadonlyMap<string, SourceFingerprint>,
+  alreadyRead: ReadonlySet<string>,
+): string[] {
+  const raw: unknown[] = archive
+    .prepare("SELECT folder_name, duration_ms, raw_word_count, llm_word_count FROM recording")
+    .all();
+  const out: string[] = [];
+  for (const r of raw) {
+    const archived = ArchivedFingerprintRowSchema.parse(r);
+    if (alreadyRead.has(archived.folder_name)) continue;
+    const current = source.get(archived.folder_name);
+    if (!current) continue;
+    if (
+      current.durationMs !== archived.duration_ms ||
+      current.rawWordCount !== archived.raw_word_count ||
+      current.llmWordCount !== archived.llm_word_count
+    ) {
+      out.push(archived.folder_name);
+    }
+  }
+  return out;
 }
 
 interface EmbedDirtyOpts {

@@ -8,7 +8,14 @@ import { MetaJsonSchema, SourceRecordingSchema, type SourceRecording } from "../
 
 export type { SourceRecording };
 
-const FolderNameRowSchema = z.object({ folderName: z.string() });
+const FingerprintRowSchema = z.object({
+  folderName: z.string(),
+  durationMs: z.number().nullable(),
+  rawWordCount: z.number().nullable(),
+  llmWordCount: z.number().nullable(),
+});
+
+export type SourceFingerprint = Omit<z.infer<typeof FingerprintRowSchema>, "folderName">;
 
 /**
  * Real Super Whisper schema (verified against v3.x DB on disk).
@@ -114,16 +121,46 @@ export function readSourceRecordings(
   }
 }
 
-/** All folder names currently present in the source DB. */
-export function readSourceFolderNames(path: string): Set<string> {
-  if (!existsSync(path)) return new Set();
+/** Read the given folders' rows regardless of the `datetime` bookmark. */
+export function readSourceRecordingsByFolder(
+  path: string,
+  folderNames: readonly string[],
+): SourceRecording[] {
+  if (folderNames.length === 0) return [];
   const db = new Database(path, { readonly: true });
   try {
-    const rows: unknown[] = db.prepare("SELECT folderName FROM recording").all();
-    const out = new Set<string>();
+    const placeholders = folderNames.map(() => "?").join(", ");
+    const raw: unknown[] = db
+      .prepare(`${SELECT_ROWS} WHERE r.folderName IN (${placeholders}) ORDER BY r.datetime ASC`)
+      .all(...folderNames);
+    return raw.map((r) => SourceRecordingSchema.parse(r));
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Every source row's folder name plus the columns that change when Super
+ * Whisper rewrites a row in place. Super Whisper 3 inserts a meeting row
+ * the moment recording starts (duration 0, no transcript) and fills it in
+ * when recording stops without moving `datetime`, so the bookmark alone
+ * never revisits it.
+ */
+export function readSourceFingerprints(path: string): Map<string, SourceFingerprint> {
+  const out = new Map<string, SourceFingerprint>();
+  if (!existsSync(path)) return out;
+  const db = new Database(path, { readonly: true });
+  try {
+    const rows: unknown[] = db
+      .prepare(
+        "SELECT folderName, duration AS durationMs, rawWordCount, llmWordCount FROM recording",
+      )
+      .all();
     for (const r of rows) {
-      const parsed = FolderNameRowSchema.safeParse(r);
-      if (parsed.success) out.add(parsed.data.folderName);
+      const parsed = FingerprintRowSchema.safeParse(r);
+      if (!parsed.success) continue;
+      const { folderName, ...fingerprint } = parsed.data;
+      out.set(folderName, fingerprint);
     }
     return out;
   } finally {

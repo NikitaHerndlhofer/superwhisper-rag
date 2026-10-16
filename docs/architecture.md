@@ -111,7 +111,7 @@ Semantic search composes through the shell — see "Why semantic search is shell
 2. Open the archive read-write (creates dirs / schema / config rows on first run).
 3. If the embed model differs from the last run, wipe `recording_vec` and clear `embed_*` columns (auto-detected from the `embed_model` config key — no flag needed).
 4. Snapshot the source DB via `sqlite3 .backup` (or, on failure, retry-loop copy).
-5. Read rows newer than `last_indexed_datetime`. Join via `meta.json` for each `folderName` to enrich `app_name`, `language`, etc.
+5. Read rows newer than `last_indexed_datetime`, plus any already-archived row whose source `duration` / `rawWordCount` / `llmWordCount` changed (Super Whisper 3 inserts a meeting row when recording starts and fills it in when it stops, without moving `datetime`). Join via `meta.json` for each `folderName` to enrich `app_name`, `language`, etc.
 6. Upsert into `recording`. Triggers maintain FTS5.
 7. Mark `source_deleted_at` on archive rows whose `folder_name` is no longer in the source AND whose `meta.json` is gone.
 8. Refresh `has_audio` and `source_audio_lost_at`.

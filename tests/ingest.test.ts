@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { rmSync, utimesSync } from "node:fs";
+import { rmSync, statSync, utimesSync } from "node:fs";
 import { z } from "zod";
 import { ensureFresh } from "../src/ingest/ingester.ts";
-import { makeEnv, queryOne, stubEmbed, type TestEnv } from "./helpers.ts";
+import { makeEnv, queryAll, queryOne, stubEmbed, type TestEnv } from "./helpers.ts";
 
 const CountRowSchema = z.object({ n: z.number() });
 const DeletedAtRowSchema = z.object({
   source_deleted_at: z.string().nullable(),
 });
+const TranscriptRowSchema = z.object({
+  duration_ms: z.number(),
+  raw_transcript: z.string().nullable(),
+});
+const FolderRowSchema = z.object({ folder_name: z.string() });
+
+const MEETING_FOLDER = "1792189684";
+const MEETING_ID = "meeting-stub-id";
+const MEETING_START = "2026-10-16 22:28:04.000";
+const MEETING_TRANSCRIPT = "Let us review the harbour migration plan.";
 
 let env: TestEnv;
 
@@ -29,6 +39,77 @@ function defaultOpts() {
     ollamaHost: "http://127.0.0.1:0",
     embedFn: stubEmbed,
   };
+}
+
+/** Super Whisper 3 inserts a meeting row the moment recording starts. */
+function startMeetingInSource(): void {
+  const sdb = new Database(env.sourceDb);
+  try {
+    sdb
+      .prepare(
+        `INSERT INTO recording (id, datetime, duration, modeName, rawWordCount, llmWordCount, folderName)
+         VALUES (?, ?, 0, 'Meeting', 0, 0, ?)`,
+      )
+      .run(MEETING_ID, MEETING_START, MEETING_FOLDER);
+  } finally {
+    sdb.close();
+  }
+  touchSource();
+}
+
+/** ...and rewrites the same row in place when it stops, keeping `datetime`. */
+function finishMeetingInSource(): void {
+  const sdb = new Database(env.sourceDb);
+  try {
+    sdb
+      .prepare(
+        "UPDATE recording SET duration = 17185, rawWordCount = 7, llmWordCount = 7 WHERE folderName = ?",
+      )
+      .run(MEETING_FOLDER);
+    sdb
+      .prepare(
+        "INSERT INTO recording_fts (recordingId, llmResult, rawResult, result) VALUES (?, '', ?, ?)",
+      )
+      .run(MEETING_ID, MEETING_TRANSCRIPT, MEETING_TRANSCRIPT);
+  } finally {
+    sdb.close();
+  }
+  touchSource();
+}
+
+function touchSource(): void {
+  const later = new Date(Date.now() + 5_000);
+  utimesSync(env.sourceDb, later, later);
+}
+
+function readArchivedMeeting(): z.infer<typeof TranscriptRowSchema> {
+  const db = new Database(env.archive, { readonly: true });
+  try {
+    return queryOne(
+      db,
+      TranscriptRowSchema,
+      "SELECT duration_ms, raw_transcript FROM recording WHERE folder_name = ?",
+      MEETING_FOLDER,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function searchArchive(term: string): string[] {
+  const db = new Database(env.archive, { readonly: true });
+  try {
+    return queryAll(
+      db,
+      FolderRowSchema,
+      `SELECT r.folder_name FROM recording_fts
+       JOIN recording r ON r.rowid = recording_fts.rowid
+       WHERE recording_fts MATCH ?`,
+      term,
+    ).map((r) => r.folder_name);
+  } finally {
+    db.close();
+  }
 }
 
 describe("ensureFresh", () => {
@@ -112,5 +193,53 @@ describe("ensureFresh", () => {
     } finally {
       db.close();
     }
+  });
+
+  test("should pick up a meeting finalised in place after its in-progress stub was indexed", async () => {
+    startMeetingInSource();
+    await ensureFresh(defaultOpts());
+    finishMeetingInSource();
+
+    await ensureFresh(defaultOpts());
+
+    expect(readArchivedMeeting()).toEqual({
+      duration_ms: 17185,
+      raw_transcript: MEETING_TRANSCRIPT,
+    });
+    expect(searchArchive("harbour")).toEqual([MEETING_FOLDER]);
+  });
+
+  test("should not re-ingest a repaired row on later syncs", async () => {
+    startMeetingInSource();
+    await ensureFresh(defaultOpts());
+    finishMeetingInSource();
+    await ensureFresh(defaultOpts());
+    touchSource();
+
+    const r = await ensureFresh(defaultOpts());
+
+    expect(r.fastPath).toBe(false);
+    expect(r.updatedRows).toBe(0);
+  });
+
+  test("should repair a meeting stub left stale by an earlier binary once upgraded", async () => {
+    startMeetingInSource();
+    await ensureFresh(defaultOpts());
+    finishMeetingInSource();
+    const adb = new Database(env.archive);
+    try {
+      const setConfig = adb.prepare("UPDATE config SET value = ? WHERE key = ?");
+      setConfig.run(statSync(env.sourceDb, { bigint: true }).mtimeNs.toString(), "source_mtime_ns");
+      setConfig.run("6", "data_version");
+    } finally {
+      adb.close();
+    }
+
+    await ensureFresh(defaultOpts());
+
+    expect(readArchivedMeeting()).toEqual({
+      duration_ms: 17185,
+      raw_transcript: MEETING_TRANSCRIPT,
+    });
   });
 });
