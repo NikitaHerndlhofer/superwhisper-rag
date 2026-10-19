@@ -35,6 +35,7 @@ import cleanupV09 from "./migrations/005_cleanup_v09.sql" with { type: "text" };
 import transcriptSchema from "./migrations/006_transcript_schema.sql" with { type: "text" };
 import trigram from "./migrations/007_trigram.sql" with { type: "text" };
 import dropRedundantIndexes from "./migrations/008_drop_redundant_indexes.sql" with { type: "text" };
+import processedTranscriptLlmFallback from "./migrations/009_processed_transcript_llm_fallback.sql" with { type: "text" };
 
 export interface Migration {
   /** Strictly increasing integer; matches the file name prefix. */
@@ -58,6 +59,11 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 6, name: "transcript_schema", sql: transcriptSchema },
   { version: 7, name: "trigram", sql: trigram },
   { version: 8, name: "drop_redundant_indexes", sql: dropRedundantIndexes },
+  {
+    version: 9,
+    name: "processed_transcript_llm_fallback",
+    sql: processedTranscriptLlmFallback,
+  },
 ];
 
 /** Latest version known to this binary. */

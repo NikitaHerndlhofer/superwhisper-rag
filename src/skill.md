@@ -61,8 +61,15 @@ SQL
   `datetime_iso` (indexed — sort/filter on this, NOT raw `datetime`),
   `mode_name`/`mode_name_lower` (indexed), `app_name`, `language`,
   `duration_sec`, `raw_word_count`, `processed_word_count`.
-  - Transcripts: `raw_transcript` (STT, always present), `processed_transcript`
-    (LLM, NULL if no LLM). Use `COALESCE(processed_transcript, raw_transcript)`.
+  - Transcripts: `raw_transcript` (STT, verbatim, always present) and
+    `processed_transcript` (LLM output, NULL if the mode ran no LLM). For
+    dictation modes that is the cleaned-up text; for meeting modes it is the LLM
+    summary (notes, decisions, action items), not a transcript. Use
+    `COALESCE(processed_transcript, raw_transcript)` for "the text", and
+    `raw_transcript` when you need the exact words said.
+  - Chunks and vectors are built from `processed_transcript` when it exists, so
+    semantic and chunk search over a meeting hits its summary. For the verbatim
+    words of a meeting, search `raw_transcript` via `recording_fts` / `recording_trgm`.
   - `superseded_by` points at a newer reprocessing row. **Always filter
     `WHERE superseded_by IS NULL`** unless the user asks for reprocessing history.
   - `source_deleted_at`/`source_audio_lost_at` — preservation markers.
@@ -105,6 +112,14 @@ FROM recording
 WHERE superseded_by IS NULL AND mode_name_lower='meeting'
   AND datetime_iso >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')
 ORDER BY datetime_iso DESC;
+
+-- meeting-notes — Latest meeting's summary and verbatim transcript (mode name from `modes`).
+--     Judge a summary against raw_transcript; `-- -json` keeps the long text readable.
+SELECT folder_name, datetime_iso, ROUND(duration_sec/60.0,1) AS min, language_model_name,
+       processed_transcript AS summary, raw_transcript AS verbatim
+FROM recording
+WHERE superseded_by IS NULL AND mode_name_lower='meeting' AND duration_sec > 0
+ORDER BY datetime_iso DESC LIMIT 1;
 
 -- keyword — Keyword search (FTS5, whole-row). snippet() auto-selects the matched column.
 SELECT r.folder_name, r.datetime_iso,
@@ -271,6 +286,7 @@ FROM scored ORDER BY score DESC LIMIT 10
 | User asked for                                  | Use                                                               |
 | ----------------------------------------------- | ----------------------------------------------------------------- |
 | Today / this week / this mode                   | `today`, `mode-recent`                                            |
+| A meeting's notes, decisions, action items      | `meeting-notes`                                                   |
 | "What did I say about X" — keyword              | `keyword` (whole-row) or `keyword-chunk` (long-form)              |
 | "What did I say about X" — semantic/paraphrase  | `semantic` (whole-row) or `best-moment` (long-form)               |
 | Best of keyword + semantic                      | `hybrid` (whole-row) or `hybrid-chunk` (usually wins long-form)   |
@@ -319,6 +335,11 @@ query if recall is poor.
   chunks; they appear only via `recording*` / `recording_vec`.
 - Hard-coding mode names like `'Meeting'` without running `modes` — modes
   are user-configurable.
+- Treating a meeting's `processed_transcript` as what was said — it is the LLM's
+  summary and can misattribute or overstate. Quote `raw_transcript` for exact words.
+- Concluding a column is empty without checking — if a canonical column is NULL
+  where you expected text, inspect `result`, `llm_result`, `raw_result` before
+  telling the user nothing is there.
 
 ## Going underneath swrag
 

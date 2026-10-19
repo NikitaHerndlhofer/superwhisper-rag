@@ -46,6 +46,12 @@ describe("SKILL_MD", () => {
     expect(SKILL_MD).toContain("≥3 chars");
   });
 
+  test("explains that meeting modes put a summary in processed_transcript, verbatim words in raw_transcript", () => {
+    expect(SKILL_MD).toContain("-- meeting-notes — Latest meeting's summary and verbatim transcript");
+    expect(SKILL_MD).toContain("for meeting modes it is the LLM");
+    expect(SKILL_MD).not.toContain("(LLM, NULL if no LLM)");
+  });
+
   test("leads with stdin as the default input and documents the quoting-safe embed", () => {
     expect(SKILL_MD).toContain("swrag sql <<'SQL'");
     expect(SKILL_MD).toContain("QV=$(swrag embed <<'EOF'");

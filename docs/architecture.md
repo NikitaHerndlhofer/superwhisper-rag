@@ -138,7 +138,8 @@ src/archive/
 │   ├── 005_cleanup_v09.sql                # drop v0.9 meeting-pipeline state
 │   ├── 006_transcript_schema.sql          # canonical transcript cols + datetime_iso + v0.9 redo
 │   ├── 007_trigram.sql                    # trigram FTS5 mirrors (substring/fuzzy retrieval)
-│   └── 008_drop_redundant_indexes.sql      # drop idx_recording_datetime + idx_recording_chunk_folder
+│   ├── 008_drop_redundant_indexes.sql      # drop idx_recording_datetime + idx_recording_chunk_folder
+│   └── 009_processed_transcript_llm_fallback.sql  # processed_transcript falls back to llm_result (SW3 meeting summaries)
 ├── migrations.ts    # imports the .sql files via `with { type: "text" }`
 ├── migrate.ts       # the runner; parses statements + tracks user_version
 └── open.ts          # calls runMigrations() inside openArchive()

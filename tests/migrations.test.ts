@@ -206,6 +206,7 @@ const FROZEN_MIGRATION_HASHES: Record<number, string> = {
   6: "b6067c163713bb5a7c48a71c309e9ae60860777151cab464e71e535510c44a98",
   7: "ffb9cfbe105c20e5704512c47176f45203101d81520e1f43124a37760ca3ba67",
   8: "7709d1c4b6ab04aaee0d6b200e33b1380b54e4f1ae0df94b602dfd808d04ca5c",
+  9: "6a2ad9e92cd1a425fb2e7a6c7968a27865a5f9b5b44bd367591125cf3e785a4d",
 };
 
 describe("shipped migrations are immutable", () => {
@@ -884,6 +885,193 @@ describe("migration 008: drop redundant indexes", () => {
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_recording_datetime_iso'",
       );
       expect(kept).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/* ---------------------------------------------------------------- *
+ * Migration 009 — processed_transcript falls back to llm_result
+ * ---------------------------------------------------------------- */
+
+const MATCH_SQL = {
+  fts: "SELECT folder_name FROM recording_fts WHERE recording_fts MATCH ?",
+  trgm: "SELECT folder_name FROM recording_trgm WHERE recording_trgm MATCH ?",
+} as const;
+
+function matchFolders(db: Database, table: keyof typeof MATCH_SQL, term: string): string[] {
+  return db
+    .prepare(MATCH_SQL[table])
+    .all(term)
+    .map((r) => FtsRowSchema.parse(r).folder_name);
+}
+
+function readTranscript(db: Database, folderName: string): z.infer<typeof TranscriptRowSchema> {
+  return queryOne(
+    db,
+    TranscriptRowSchema,
+    "SELECT folder_name, raw_transcript, processed_transcript, processed_word_count " +
+      `FROM recording WHERE folder_name = '${folderName}'`,
+  );
+}
+
+describe("migration 009: processed_transcript falls back to llm_result", () => {
+  test("should expose the meeting summary when result mirrors raw and llm_result holds it", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-meeting", {
+        datetime: "2026-10-19T18:46:35.000Z",
+        raw_result: "so what I wanted to discuss is the attorney pod structure",
+        result: "so what I wanted to discuss is the attorney pod structure",
+        llm_result: "Nikita walked Rafael through the attorney pod structure",
+      });
+
+      const row = readTranscript(db, "f-meeting");
+
+      expect(row.processed_transcript).toBe(
+        "Nikita walked Rafael through the attorney pod structure",
+      );
+      expect(row.processed_word_count).toBe(8);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should keep preferring result over llm_result when result differs from raw", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-both", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "raw scribe",
+        result: "polished result",
+        llm_result: "older llm output",
+      });
+
+      expect(readTranscript(db, "f-both").processed_transcript).toBe("polished result");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should stay NULL for voice-only rows whose llm_result is empty or mirrors raw", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-voice-empty-llm", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "raw voice text",
+        result: "raw voice text",
+        llm_result: "  ",
+      });
+      insertSampleRow(db, "f-voice-mirror-llm", {
+        datetime: "2026-05-27 18:39:33.470",
+        raw_result: "raw voice text",
+        result: "raw voice text",
+        llm_result: "raw voice text",
+      });
+
+      for (const folder of ["f-voice-empty-llm", "f-voice-mirror-llm"]) {
+        const row = readTranscript(db, folder);
+        expect(row.processed_transcript).toBeNull();
+        expect(row.processed_word_count).toBe(0);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should find words that exist only in llm_result via keyword and trigram search", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-summary-only", {
+        datetime: "2026-10-19T18:46:35.000Z",
+        raw_result: "boring raw words",
+        result: "boring raw words",
+        llm_result: "Decisions: adopt the gatekeeper primitive",
+      });
+
+      expect(matchFolders(db, "fts", "gatekeeper")).toContain("f-summary-only");
+      expect(matchFolders(db, "trgm", "ekeep")).toContain("f-summary-only");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should reindex when only llm_result is rewritten in place", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-stub", {
+        datetime: "2026-10-19T18:46:35.000Z",
+        raw_result: "raw words",
+        result: "raw words",
+        llm_result: "Not enough was said in this meeting to summarize.",
+      });
+
+      db.exec(
+        "UPDATE recording SET llm_result = 'Action items: schedule knowledge transfer' " +
+          "WHERE folder_name = 'f-stub'",
+      );
+
+      expect(matchFolders(db, "fts", "knowledge")).toContain("f-stub");
+      expect(matchFolders(db, "fts", "summarize")).not.toContain("f-stub");
+      expect(matchFolders(db, "trgm", "nowled")).toContain("f-stub");
+      expect(matchFolders(db, "trgm", "ummari")).not.toContain("f-stub");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should backfill summaries already archived before the upgrade", () => {
+    const db = makeRawDb();
+    try {
+      for (const m of MIGRATIONS) {
+        if (m.version <= 8) db.exec(m.sql);
+      }
+      db.exec("PRAGMA user_version = 8");
+      insertSampleRow(db, "f-pre-upgrade", {
+        datetime: "2026-10-19T18:46:35.000Z",
+        raw_result: "raw words",
+        result: "raw words",
+        llm_result: "Open questions: pterodactyl budget",
+      });
+      expect(matchFolders(db, "fts", "pterodactyl")).toHaveLength(0);
+
+      const outcome = runMigrations(db);
+
+      expect(outcome.applied).toContain(9);
+      expect(readTranscript(db, "f-pre-upgrade").processed_transcript).toBe(
+        "Open questions: pterodactyl budget",
+      );
+      expect(matchFolders(db, "fts", "pterodactyl")).toContain("f-pre-upgrade");
+      expect(matchFolders(db, "trgm", "erodac")).toContain("f-pre-upgrade");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("should keep the v_search view queryable", () => {
+    const db = makeRawDb();
+    try {
+      runMigrations(db);
+      insertSampleRow(db, "f-view", {
+        datetime: "2026-10-19T18:46:35.000Z",
+        raw_result: "raw words",
+        result: "raw words",
+        llm_result: "summary words",
+      });
+
+      const rows = queryAll(
+        db,
+        z.object({ folder_name: z.string(), processed_transcript: z.string().nullable() }),
+        "SELECT folder_name, processed_transcript FROM v_search WHERE folder_name = 'f-view'",
+      );
+
+      expect(rows).toEqual([{ folder_name: "f-view", processed_transcript: "summary words" }]);
     } finally {
       db.close();
     }

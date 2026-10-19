@@ -28,8 +28,9 @@ It's useful if you:
 ## Quick taste
 
 ```bash
-# Today's dictations. processed_transcript = the LLM-cleaned text;
-# falls back to raw_transcript when the mode didn't run an LLM.
+# Today's dictations. processed_transcript = the LLM output (cleaned text,
+# or a summary for meeting modes); falls back to raw_transcript when the
+# mode didn't run an LLM.
 swrag sql <<'SQL'
 SELECT folder_name, datetime_iso, mode_name,
        COALESCE(processed_transcript, raw_transcript) AS transcript

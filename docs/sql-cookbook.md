@@ -26,7 +26,12 @@ delimited by the `swrag:cookbook` HTML comments.
 >   - `raw_transcript` — what Scribe (STT) produced. Always present
 >     for a successful recording.
 >   - `processed_transcript` — what the LLM produced as post-processing.
->     `NULL` for voice-only modes where no LLM ran.
+>     `NULL` for voice-only modes where no LLM ran. For dictation modes
+>     that is the cleaned-up text; for meeting modes it is the LLM's
+>     summary (notes, decisions, action items), not a transcript — quote
+>     `raw_transcript` when you need the exact words. As of v1.4.0 it
+>     falls back to SW's `llm_result` when `result` merely mirrors raw,
+>     which is where Super Whisper 3 meeting modes put the summary.
 >
 >   Use `processed_transcript` when you want the polished text, and
 >   fall back to raw with `COALESCE(processed_transcript, raw_transcript)`
